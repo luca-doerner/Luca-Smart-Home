@@ -1,0 +1,351 @@
+# Luca Smart Home
+
+Smart-Home-System auf einem Raspberry Pi: Ein Node-Webserver verwaltet Zimmer, Geräte und
+Features; die Features sind C-Programme, die einen WS281x-LED-Streifen steuern. Alles, was die
+Weboberfläche anzeigt, kommt aus einer PostgreSQL-Datenbank — **neue Features und Einstellungen
+brauchen in der Regel keinen neuen Server-Code, nur neue Zeilen in der Datenbank.**
+
+Daneben steht seit neuestem der **Rezeptteil** (Rezepte, Zutaten, Vorrat, Einkaufsliste) mit
+einem **MCP-Server**, über den eine KI die Rezepte benutzen kann. Für ihn gilt die Regel oben
+ausdrücklich **nicht**: er hat eigene Tabellen, eigene Routen und eigene Seiten (siehe unten).
+
+Sprache: Code-Kommentare und Oberfläche sind deutsch bzw. gemischt deutsch/englisch, Benutzer
+und Commit-Messages deutsch.
+
+## Ordner
+
+| Ordner | Inhalt |
+|---|---|
+| `Luca_Smart_Home/C/` | die Feature-Programme in C (`ambilight`, `static_color`, `color_flow`) + `leds.c`/`leds.h` |
+| `Luca_Smart_Home/Node/` | Webserver (nur Abhängigkeit: `pg`), `public/` ist das Frontend, dazu Rezepte und MCP |
+| `Luca_Smart_Home/Database/` | `schema.sql` + `seed.sql`, laufen bei **jedem** Deploy |
+| `deploy/` | `ansible.yml`, `inventory.ini` |
+| `.github/workflows/pipeline.yml` | Deploy bei Push auf `main` |
+| `Ambilight_Flask/` | **Vorgänger** (Python/Flask), nicht mehr pflegen; `static/python/ambilight.py` war die Vorlage für `ambilight.c` |
+| `Ambilight_Node/` | leerer Restordner, nicht in Git |
+
+## Datenfluss
+
+```
+Browser ──HTTP/JSON──> Node (server.js)
+                        ├── PostgreSQL  (Einstellungen, Geräte, Benutzer, Rezepte)
+                        ├── features.js ──spawn──> C-Programm   (--name=wert beim Start)
+                        │               └──UDP 9000──> C-Programm ("name: wert" im Betrieb)
+                        └── recipes.js / pantry.js  (Rezepte, Zutaten, Vorrat, Einkaufsliste)
+            <──SSE /api/log──  stdout/stderr der C-Programme
+
+KI ──HTTP/JSON-RPC + Bearer-Token──> /api/mcp (mcp.js) ──> recipes.js / pantry.js
+```
+
+## Datenbank (`Database/schema.sql`)
+
+`rooms` → `devices` (verschachtelbar) → `features` → `setting_definitions` / `settings`,
+dazu `device_setting_definitions` / `device_settings`, `feature_kinds`, `users`, `sessions`,
+`api_tokens` und die rekursive View `devices_with_room`.
+Der Rezeptteil steht daneben: `ingredients` → `recipes` → `recipe_ingredients` / `recipe_steps`,
+dazu `pantry_items` und die View `recipes_search`.
+
+- `devices`: entweder `room_id` **oder** `parent_device_id` (CHECK `num_nonnulls(...) = 1`);
+  ein Trigger verhindert Zyklen; `pinned_at` = in der Navigation angeheftet.
+- `features`: `kind` (`service`/`oneshot`), `executable` (relativ zu `Luca_Smart_Home/`),
+  `udp_port`, `exclusive`, `active`. Partieller Unique-Index
+  `features_one_active_exclusive`: pro Gerät höchstens ein aktives exklusives Feature.
+- Werte stehen als `JSONB` in `settings`; fehlt eine Zeile, gilt `default_value`.
+- `recipe_ingredients` und `recipe_steps` haben `PRIMARY KEY (recipe_id, position)` statt einer
+  eigenen id: die Reihenfolge ist Teil der Identität („Schritt 3“), und Speichern ersetzt die
+  ganze Liste. `pantry_items.ingredient_id` ist selbst der Primärschlüssel — jede Zutat kann
+  höchstens einmal im Vorrat stehen, genau das macht das Abziehen eindeutig.
+- `recipe_ingredients.ingredient_id` zeigt mit `ON DELETE RESTRICT` auf den Katalog: eine Zutat,
+  die ein Rezept benutzt, lässt sich nicht aus Versehen löschen.
+- `recipes.tags` ist ein `TEXT[]` mit GIN-Index (`tags && ARRAY['vegetarisch']`), keine
+  Tag-Tabelle.
+- `recipes.image_mime IS NULL` heißt „kein Bild“; die Datei liegt **nicht** in der Datenbank,
+  sondern unter `RECIPE_IMAGE_DIR/<id>.<ext>` (wegen `max: 1` in `db.js`).
+- `recipes_search` ist eine View, kein gespeichertes `tsvector`-Feld: der Text kommt aus drei
+  Tabellen, eine `GENERATED`-Spalte kann das nicht. Gewichte A–D (Name, Tags/Zutaten,
+  Beschreibung, Schritte), gesucht mit `websearch_to_tsquery('german', …)`.
+
+**Regeln, die hier immer gelten:**
+- Beide SQL-Dateien laufen bei jedem Deploy und müssen **idempotent** sein:
+  `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + `DO`-Blöcke, die
+  vorher in `information_schema` nachsehen.
+- `CREATE TABLE IF NOT EXISTS` ändert eine vorhandene Tabelle **nicht**. Deshalb werden die
+  CHECK-Constraints für `type`, `options` und `default_value` bei jedem Lauf gelöscht und neu
+  angelegt (`DO`-Block mit `FOREACH` am Ende der Datei). **Ein neuer Setting-Typ wird nur dort
+  eingetragen.**
+- `seed.sql` legt Startdaten nur an, solange es das jeweilige Feature noch nicht gibt
+  (`IF EXISTS (SELECT 1 FROM features WHERE type = '...') THEN RETURN`), damit Umbenennen auf dem
+  Pi erhalten bleibt. Nachträgliche Settings werden per `NOT EXISTS`-Prüfung **pro Name**
+  nachgezogen.
+- Ein absichtlich gelöschtes Setting kommt beim nächsten Deploy wieder — stattdessen das Feature
+  löschen.
+- `device_setting_definitions` (z. B. `led_count_left`) legt das Seed **nicht** an, die stehen
+  direkt auf dem Pi.
+- Der Rezeptteil hat **zwei** Guards im Seed: einen für die Beispielrezepte
+  (`IF EXISTS (SELECT 1 FROM recipes)`) und einen eigenen für den Grundvorrat
+  (`IF EXISTS (SELECT 1 FROM pantry_items)`) — ohne den zweiten käme der Grundvorrat nie, sobald
+  ein Rezept da ist.
+- Der CHECK auf `recipes.difficulty` wird wie die Setting-Regeln bei jedem Lauf gelöscht und neu
+  angelegt (am Dateiende). **Eine neue Schwierigkeitsstufe wird nur dort eingetragen** — dazu
+  `DIFFICULTIES` in `recipes.js`.
+
+## Feature-Arten
+
+| | `service` | `oneshot` |
+|---|---|---|
+| Lauf | dauerhaft, Start/Stopp-Knopf, `features.active` wird gemerkt | einmal, bei jedem Speichern |
+| Start | alle Einstellungen als `--name=wert` | alle Einstellungen als `--name=wert` |
+| Änderung im Betrieb | per UDP `"name: wert"` an `udp_port` | nur beim nächsten Lauf |
+| `restart_required` | Speichern-Knopf, startet den Dienst neu | nicht genutzt |
+
+- Ein Service darf UDP erst bekommen, wenn er bereit ist: Er gibt dazu eine Zeile aus, die mit
+  `Started` beginnt (`STARTED_LINE` in `features.js`), danach schickt der Server alle Live-Werte.
+- Exklusivität: Ein exklusiver **Oneshot** stoppt vorher die exklusiven Services seines Geräts.
+  Ein exklusiver **Service** setzt beim Start bei allen exklusiven Oneshots des Geräts das
+  Setting `power` auf aus (`POWER_SETTING` in `features.js`).
+- Geräte-Einstellungen gehen **immer** an jedes Programm des Geräts (vor den
+  Feature-Einstellungen); ihre Änderung startet die laufenden Services des Geräts neu.
+- Eine neue Art braucht eine Zeile in `feature_kinds` und einen Zweig in `features.js`.
+
+## Setting-Typen
+
+`range` (Schieber), `number`, `boolean`, `text`, `select`, `button_select` (ein Knopf pro Option,
+wie ein Power-BI-Schaltflächenslicer), `color` (Farbwähler + editierbares Hex-Feld),
+`color_list` (mehrere Farben, sortierbar), `screen` (vier Zahlen um einen Bildschirm).
+
+Übergabe an das Programm (`settingPairs` in `features.js`):
+
+| Typ | Datenbank (JSONB) | an das Programm |
+|---|---|---|
+| normal | `70` | `--brightness=70` / `brightness: 70` |
+| `color_list` | `["#ff0000","#00ff00"]` | `--colors=#ff0000,#00ff00` |
+| `screen` | `{"top":1,"left":1,"right":1,"bottom":1}` | `--distance_top=1 --distance_left=1 ...` |
+
+Prozente statt Brüche: Die Seite schickt `brightness: 70`, das C-Programm rechnet `/100.0`.
+Ein neuer Typ braucht: CHECK in `schema.sql`, `validateValue` in `smarthome.js`,
+`settingInput` in `public/feature-panel.js`, ggf. `settingPairs` in `features.js`, CSS.
+
+## C-Seite (`Luca_Smart_Home/C/`)
+
+`leds.h`/`leds.c` sind der gemeinsame Teil, jedes Programm ist eine eigene `.c`-Datei;
+das `Makefile` baut `PROGRAMS = ambilight static_color color_flow` jeweils mit `leds.c`.
+
+Gemeinsames aus `leds.c`: `leds_init`, `leds_fill`, `leds_off` (schwarz + render, **ohne**
+`ws2811_fini` — das macht der Aufrufer), `load_config` (Geräte-Einstellungen `led_count_*`,
+`led_pin`, `led_dma`), `load_settings(argc, argv, count, names, callback)` (baut das
+`struct option`-Array aus den Namen), `init_socket(int *s)`, `poll_settings(int *s, callback)`,
+`init_signals`/`get_running` (`volatile sig_atomic_t running`).
+
+Aufbau jedes Programms:
+
+```c
+static const char *SETTING_NAMES[] = { "colors", "speed", "brightness" };
+#define SETTING_COUNT ((int)(sizeof SETTING_NAMES / sizeof *SETTING_NAMES))
+static int set_setting(const char *name, const char *value);   // 0 = unbekannt/ungueltig
+
+int main(int argc, char *argv[]) {
+    init_signals();
+    led_config_t config = load_config(argc, argv);
+    load_settings(argc, argv, SETTING_COUNT, SETTING_NAMES, set_setting);
+    int s; init_socket(&s);
+    leds_init(&strip, config.led_count, config.led_pin, config.led_dma, 255);
+    printf("Started ...\n");                 // ab hier schickt der Server UDP
+    while (get_running()) { poll_settings(&s, set_setting); /* ... */ }
+    leds_off(&strip); ws2811_fini(&strip);
+}
+```
+
+| Programm | Art | Einstellungen |
+|---|---|---|
+| `ambilight.c` | service | `brightness`, `smooth_ratio`, `dark_gamma`, `resize_size`, `distance_{left,top,right,bottom}`, `strength_{red,green,blue}` |
+| `static_color.c` | oneshot | `power` (on/off), `color`, `brightness` (0–255) |
+| `color_flow.c` | service | `colors` (Liste), `speed` (ms pro Schritt), `brightness` (%) |
+
+- `ambilight.c`: V4L2-Capture (mmap, 640×480 YUYV), BT.601-Umrechnung, Ränder abtasten,
+  Glättung `alt * smooth_ratio + neu * (1 - smooth_ratio)`, Schwarzbild-Erkennung über ein
+  Raster, automatische Letterbox-Erkennung (`AUTO_BARS`, größere Balken erst nach
+  `BAR_GROW_FRAMES`).
+- `color_flow.c`: Lauflicht — alle `speed` ms wird die nächste Farbe vorne eingeschoben
+  (`memmove` + `pixels[0]`), gerendert wird nur bei einer Änderung (`needs_render`), Takt über
+  `CLOCK_MONOTONIC` mit `last_step += speed_ms`; Nachholen auf `led_count` Schritte begrenzt.
+  Die Farbliste wird auf einer Kopie zerlegt (`strtok_r`) und erst nach vollständigem Prüfen
+  übernommen, damit eine kaputte Nachricht die laufende Animation nicht stört.
+
+**Fallen, die schon weh getan haben:**
+- `sscanf` in `uint8_t` braucht `%2hhx`, nicht `%2x`.
+- Lange `getopt_long`-Optionen brauchen eigene `val`-Codes (`OPT_*` ab 1001, Settings ab
+  `OPT_SETTING_BASE 3001`) — zwei gleiche `case`-Werte sind ein Compile-Fehler.
+- `SETTING_VALUE_MAX 256` in `leds.h` begrenzt UDP-Werte; vorher waren es 64 Bytes und `%31s`,
+  damit wäre eine Farbliste mit 20 Farben (159 Zeichen) still abgeschnitten worden.
+- `ws2811_render` nicht vergessen — ohne den Aufruf bekommt der Streifen nie Daten.
+- Bei der Rand-Abtastung ist `resize_size - d` richtig (nicht `- 1 - d`), weil `nearest()` die
+  linke/obere Zellkante wählt — damit ist es symmetrisch zu `d`.
+- Root ist nötig (DMA/PWM), sonst kommt "Failed to create mailbox device".
+
+## Node-Seite (`Luca_Smart_Home/Node/`)
+
+Kein Framework, nur `http`/`dgram`/`child_process` + `pg`.
+
+| Datei | Aufgabe |
+|---|---|
+| `server.js` | Routen-Tabelle `[methode, regex, handler]`, Dateien aus `public/`, Security-Header |
+| `smarthome.js` | Datenbankzugriff: Baum, Geräte, Features, Einstellungen laden/prüfen/speichern |
+| `features.js` | startet/stoppt die Programme, UDP, Oneshot-Läufe, Exklusivitätsregeln |
+| `auth.js` | Login: scrypt-Hash, Session-Token (nur SHA-256 davon in der DB), Ratenbegrenzung, Bearer-Tokens |
+| `user.js` | `sudo node user.js add/password/delete/list` + `token add/list/delete` (keine Registrierungsseite) |
+| `recipes.js` | Rezepte, Zutaten, Tags, Skalieren, Einkaufsliste, Bilder |
+| `pantry.js` | der Vorrat (`pantry_items`) |
+| `mcp.js` | MCP-Server: JSON-RPC über `POST /api/mcp`, ruft `recipes.js`/`pantry.js` direkt auf |
+| `db.js` | `new Pool({ max: 1, options: "-c jit=off" })` |
+| `log.js` | letzte 200 Zeilen + SSE-Stream `/api/log` |
+| `public/` | `app.js` (Navigation + Seiten), `feature-panel.js` (Panels aus den Definitionen), `recipes.js`/`pantry.js` (Rezeptseiten), `lib.js` (`api`, `el`, `icon`, `throttle`, `errorBox`, `showPage`, `breadcrumb`, `cardGrid`, `plural`), `style.css`, `login.*` |
+
+Routen: `/api/health` (ohne Login, für den Deploy), `/api/login|logout|me`, `/api/navigation`,
+`/api/rooms/:id`, `/api/devices/:id` (+`/settings`, `/pinned`), `/api/features/:id`
+(+`/state`, `/active`, `/settings`), `/api/log`; dazu `/api/recipes` (+`/:id`, `/:id/delete`,
+`/:id/ingredients`, `/:id/shopping-list`, `/:id/image` (+`/delete`)), `/api/ingredients`,
+`/api/tags`, `/api/pantry` (+`/:ingredientId/delete`) und `/api/mcp`.
+Seiten: `/rooms`, `/rooms/:id`, `/devices/:id`, `/recipes`, `/recipes/new`, `/recipes/:id`
+(`?edit=1` zum Bearbeiten), `/pantry`.
+
+Umgebung: `PORT` (5000), `HOST`, `PG*`, `UDP_HOST` (127.0.0.1),
+`RECIPE_IMAGE_DIR` (`/var/lib/luca-smart-home/recipe-images`). Start: `sudo node server.js`
+(root wegen der LEDs).
+
+**Entscheidungen mit Grund:**
+- `jit=off`: PostgreSQL schätzt die rekursive View völlig falsch ein und compiliert die Abfrage
+  sekundenlang — das war die Ursache für ~1,1 s Ladezeit pro Seitenwechsel.
+- `max: 1`: Schreibvorgänge bleiben in der Reihenfolge, in der sie gestartet wurden.
+- Statische Dateien mit `Cache-Control: no-cache` + ETag/304, API mit `no-store` — sonst zeigen
+  Browser und Cloudflare nach einem Deploy alte Dateien.
+- CSRF: Es wird nur `application/json` angenommen, dazu ein `SameSite=Lax`-Cookie — deshalb ist
+  kein Token nötig.
+- `next` beim Login wird über `new URL(next, location.origin)` geprüft (offene Weiterleitung).
+- Das Frontend baut DOM mit `el()` statt `innerHTML` (XSS) und wechselt Tabs über
+  `history.pushState`, ohne die Seite neu zu laden.
+- `features.state(id)` unterscheidet "gestartet" (`active`) von "läuft wirklich" (`running`) —
+  die Punkte in der Tab-Leiste zeigen `running`.
+- `readJson(req, limit)`: Standard 10 000 Zeichen, Rezepte 100 000. Zu große Anfragen bekommen
+  eine echte `413` statt eines zerstörten Sockets.
+- Der Bild-Upload geht an `readJson` **vorbei** (rohe Bytes, `readImageBody`). Der Dateityp wird
+  an den ersten Bytes geprüft, nie am `Content-Type` — der kommt vom Browser. `image/*` ist
+  trotzdem CSRF-sicher: ein fremdes Formular kann nur `text/plain`, `multipart/form-data` oder
+  `x-www-form-urlencoded` schicken.
+- Das Frontend verkleinert Bilder vorher per `canvas` auf 1600 px. Das hält den Upload klein und
+  wirft nebenbei die EXIF-Daten weg (Aufnahmeort in Handyfotos).
+
+## Rezepte, Vorrat und Einkaufsliste
+
+- **Zutaten werden überall über ihren Namen angesprochen, nie über eine id** (`lower()`-Vergleich,
+  unbekannte Namen werden angelegt). Sonst müsste ein KI-Agent erst ids einsammeln, bevor er
+  etwas speichern kann.
+- **Speichern ersetzt Zutaten und Schritte komplett** (`DELETE` + `INSERT` in einer Transaktion).
+  Bei Listen mit Reihenfolge ist Ersetzen das einzig Vorhersagbare — die Seite und
+  `update_recipe` müssen deshalb immer die ganze Liste mitschicken.
+- Skalieren (`?servings=`) rechnet `amount * servings / recipes.servings` und rundet: ab 10 auf
+  ganze Zahlen, ab 1 auf halbe Schritte, darunter auf zwei Stellen. Zutaten ohne Menge
+  („etwas Öl“) bleiben unverändert. Das rechnet **immer der Server**, damit Seite, API und
+  MCP-Werkzeuge dieselben Zahlen zeigen.
+- **Einkaufsliste** (`planShoppingList`): eine Zutat, die im Vorrat steht, kommt nicht auf die
+  Liste — außer der Vorrat hat dieselbe Einheit und zu wenig davon, dann nur die fehlende Menge.
+  `items` ist genau die Form, die Bring! `saveItem(listUuid, itemName, specification)` braucht:
+  `{ name, spec }`. `from_pantry` und `note` sind **Pflicht in der Antwort**, auch wenn leer:
+  der Agent soll die Vorratszutaten nennen, damit nichts vergessen wird.
+- Mehrere Rezepte werden zusammengefasst: gleiche Zutat und gleiche Einheit werden addiert, eine
+  Zutat ohne Menge („Butter zum Braten“) wird in den vorhandenen Eintrag eingehängt.
+
+## MCP-Server (`Node/mcp.js`)
+
+Eine Route, `POST /api/mcp`, JSON-RPC 2.0. **Kein `@modelcontextprotocol/sdk`** — das wäre die
+erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` direkt auf.
+
+- **Zwei Protokoll-Zeitalter in einem Server („dual-era“).** Alt (bis `2025-11-25`): `initialize`,
+  dann `tools/list`. Neu (ab `2026-07-28`): kein Handshake, jede Anfrage trägt ihre Version in
+  `_meta["io.modelcontextprotocol/protocolVersion"]` und im Header `MCP-Protocol-Version`,
+  Ergebnisse haben `resultType: "complete"`, `server/discover` ersetzt `initialize`. Welches ein
+  Client spricht, weiß man vorher nicht.
+- Absichtliche Abweichung: `Mcp-Method`/`Mcp-Name` werden nur geprüft, **wenn** sie da sind
+  (Spec verlangt sie). Stimmen sie nicht zum Körper → `400` mit `-32020`.
+- `GET`/`DELETE` auf `/api/mcp` → `405` (die gab es nur im alten Transport).
+- Fehler eines Werkzeugs kommen als Ergebnis mit `isError: true` zurück, nicht als
+  Protokollfehler — nur so liest das Modell die Meldung und kann es richtig nochmal versuchen.
+- **Anmeldung:** `Authorization: Bearer <token>` aus `api_tokens`. Eingehängt an genau einer
+  Stelle (`auth.userFromRequest`: erst Cookie, dann Bearer), dadurch ist die ganze API damit
+  erreichbar. Token anlegen: `sudo node user.js token add <benutzer> <name> [tage]` — es wird
+  genau einmal angezeigt, gespeichert ist nur der SHA-256-Hash. Falsche Tokens zählen in dieselbe
+  Sperre wie falsche Passwörter.
+- Einhängen: `claude mcp add --transport http rezepte https://<adresse>/api/mcp --header
+  "Authorization: Bearer …"`. In claude.ai und der Handy-App geht das noch nicht, dafür bräuchte
+  es OAuth (offener Punkt).
+- Bring! läuft **nicht** auf dem Pi: Luca hängt am PC
+  [florianwittkamp/bring-mcp](https://github.com/florianwittkamp/bring-mcp) als zweiten Konnektor
+  ein, `plan_shopping_list` liefert passend `{ name, spec }`. Vom Handy aus geht die
+  Bring!-Übergabe deshalb noch nicht.
+
+## Deploy
+
+Push auf `main` → GitHub Actions → `ansible-playbook` über `cloudflared access ssh`
+(Cloudflare Access Service Token) → auf dem Pi: Dienst stoppen, Ordner kopieren,
+`schema.sql` + `seed.sql`, `make`, `npm ci --omit=dev`, Bildordner anlegen,
+`/etc/luca-smart-home.env` schreiben, systemd-Unit `luca-smart-home` installieren und starten,
+`/api/health` prüfen. Eine `concurrency`-Gruppe sorgt dafür, dass zwei Deploys sich nicht
+überholen (`cancel-in-progress: false` — ein abgebrochener Deploy ließe den Pi halb kopiert
+zurück).
+
+Die Unit setzt `HOST=127.0.0.1`: der Server ist **nur noch über den Cloudflare-Tunnel**
+erreichbar, nicht mehr unter `http://<pi>:5000` im Heimnetz.
+`RECIPE_IMAGE_DIR=/var/lib/luca-smart-home/recipe-images` liegt außerhalb des Ordners, den der
+Deploy kopiert — sonst wären die Bilder nach jedem Deploy weg.
+
+GitHub: Secrets `SSH_PASSWORD`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `DB_PASSWORD`;
+Variablen `SSH_USER`, `SERVER_IP`, `DB_USER`, `DB_NAME`.
+
+## Testen (Windows, alles in Docker)
+
+Es gibt keine Testsuite; geprüft wird mit Containern. In Git Bash **`MSYS_NO_PATHCONV=1`** vor
+`docker run` setzen, sonst verbiegt Git Bash die Pfade.
+
+`rpi_ws281x` selbst bauen (die Debian-Pakete sind oft nicht erreichbar, cmake ist nicht nötig):
+Repo klonen, eine `version.h` mit `VERSION_MAJOR/MINOR/MICRO` selbst schreiben, dann
+`gcc -O2 -c ws2811.c pwm.c pcm.c dma.c mailbox.c rpihw.c` und `ar rcs libws2811.a *.o`;
+die Header nach `include/ws2811/` kopieren, weil die Programme `<ws2811/ws2811.h>` einbinden.
+
+Bauen: `make CFLAGS="-O2 -Wall -Wextra -I/w/include" LDLIBS="/w/lib/libws2811.a -lm"`.
+
+Verhalten ohne Pi: einen Stub mit `ws2811_init/fini/render/wait/get_return_t_str` dazulinken,
+der jeden Render-Durchgang als Hex-Zeile druckt, dazu ein kleines Sendeprogramm
+(`sendto` an `127.0.0.1:9000`) für die Live-Einstellungen. Mit
+`-fsanitize=address,undefined` bauen.
+
+Datenbank: `postgres:15-alpine` starten, **erst den Stand vom Pi** (alte `schema.sql` + `seed.sql`
+aus `git show`), dann die neuen Dateien zweimal darüber — beides muss fehlerfrei durchlaufen.
+Beim `psql -f` in Git Bash den Pfad im Container mit doppeltem Schrägstrich schreiben
+(`-f //schema.sql`). `MSYS_NO_PATHCONV=1` gilt auch für `docker exec`, nicht nur `docker run`.
+
+Node-Seite: Container mit `-p 55432:5432` starten, dann den Server lokal gegen ihn laufen lassen
+(`PGHOST=127.0.0.1 PGPORT=55432 … PORT=5099 RECIPE_IMAGE_DIR=<Temp-Ordner> node server.js`) und
+mit `curl` durchgehen. Für den MCP-Teil vorher `node user.js token add luca test` — das Token
+geht dann als `Authorization: Bearer …` an `/api/mcp`.
+Die Oberfläche lässt sich im eingebauten Browser prüfen; auch auf 375 px Breite ansehen.
+
+## Zusammenarbeit
+
+- Antworten auf Deutsch, ausführlich erklären: Luca lernt C, also auch erklären **warum** etwas
+  so gemacht wird, nicht nur den Code zeigen.
+- Nur auf Ansage pushen ("push") — dann direkt auf `main`, das löst den Deploy aus.
+- Luca wendet Änderungen oft selbst an; dann den Stand lesen und seine Struktur weiterführen
+  statt sie zu ersetzen (bei `color_flow.c` kam das Lauflicht von ihm).
+- Vor einer Aussage über das Verhalten eines Programms im Container nachbauen und laufen lassen;
+  er prüft Behauptungen nach und hat schon mehrfach zu Recht widersprochen.
+
+## Offene Punkte
+
+- **OAuth für den MCP-Server**, damit der Konnektor direkt in claude.ai und der Handy-App
+  eingehängt werden kann: `/.well-known/oauth-protected-resource` und
+  `/.well-known/oauth-authorization-server`, dynamische Client-Registrierung, `/authorize` über
+  das bestehende Login, `/token` mit PKCE-S256, `401` mit `WWW-Authenticate`. Die Tokens landen
+  in derselben `api_tokens`-Tabelle.
+- Ein gehosteter Bring!-MCP, damit die Übergabe auch vom Handy aus geht.
+- Der Name-CHECK (`^[a-z][a-z0-9_-]*$`) wird bei vorhandenen Tabellen nicht ersetzt; wenn er
+  sich ändern soll, in den `DO`-Block zu den anderen Constraints aufnehmen.
+- `ambilight.c` ist noch einthreadig (Aufnahme und Ausgabe in einer Schleife).

@@ -1,9 +1,12 @@
-// Login with username and password (tables users and sessions).
+// Login with username and password (tables users and sessions, api_tokens).
 //
 // - passwords are stored as scrypt hash with a random salt, never in plain text
 // - after the login the browser gets a random 256 bit token in an HttpOnly cookie; the database
 //   only keeps its SHA-256 hash; the session lasts SESSION_DAYS and is extended while it is used
 // - too many failed logins per IP / user are blocked for a while
+// - Programme (der MCP-Server, mcp.js) melden sich stattdessen mit "Authorization: Bearer ..."
+//   an; das hängt an genau einer Stelle (userFromRequest), dadurch ist die ganze API damit
+//   erreichbar, ohne dass eine Route sich ändert
 const crypto = require("crypto");
 const { promisify } = require("util");
 const db = require("./db");
@@ -107,7 +110,7 @@ function tokenHash(token) {
 /*************** Sessions *********************************************************************/
 // the logged in user of the request ({ id, username }) or null; extends the session and its
 // cookie (on res) at most once per SESSION_REFRESH_MS
-async function userFromRequest(req, res) {
+async function userFromSession(req, res) {
     const token = sessionToken(req);
     if (!token)
         return null;
@@ -125,6 +128,71 @@ async function userFromRequest(req, res) {
         res.setHeader("Set-Cookie", sessionCookie(req, token, SESSION_DAYS * 24 * 60 * 60));
     }
     return { id: session.id, username: session.username };
+}
+
+/*************** API-Tokens ******************************************************************/
+// "Authorization: Bearer <token>" statt Cookie, für Programme
+function bearerToken(req) {
+    const header = req.headers.authorization ?? "";
+    return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : null;
+}
+
+// Benutzer zu einem API-Token oder null. Falsche Tokens zählen in dieselbe Sperre wie falsche
+// Passwörter (blocked / recordFailure), damit niemand Tokens durchprobieren kann.
+async function userFromToken(req) {
+    const token = bearerToken(req);
+    if (!token)
+        return null;
+    const ipKey = `ip:${clientIp(req)}`;
+    if (blocked(ipKey, MAX_FAILURES_PER_IP))
+        throw new HttpError(429, "Zu viele fehlgeschlagene Versuche, bitte in 15 Minuten nochmal");
+
+    const { rows: [row] } = await db.query(`
+        SELECT t.token_hash, t.last_used_at, u.id, u.username
+        FROM api_tokens t JOIN users u ON u.id = t.user_id
+        WHERE t.token_hash = $1 AND (t.expires_at IS NULL OR t.expires_at > now())`, [tokenHash(token)]);
+    if (!row) {
+        recordFailure(ipKey);
+        log(`Unbekanntes API-Token von ${clientIp(req)}`);
+        return null;
+    }
+
+    // last_used_at nur höchstens einmal pro Stunde schreiben, sonst schreibt jede Anfrage
+    // in die Datenbank (und db.js hat nur eine Verbindung)
+    if (!row.last_used_at || Date.now() - row.last_used_at.getTime() > SESSION_REFRESH_MS)
+        await db.query("UPDATE api_tokens SET last_used_at = now() WHERE token_hash = $1", [row.token_hash]);
+    return { id: row.id, username: row.username, viaToken: true };
+}
+
+// Cookie zuerst, dann Bearer: ein Browser bringt immer sein Cookie mit, ein Programm nie
+async function userFromRequest(req, res) {
+    return (await userFromSession(req, res)) ?? (await userFromToken(req));
+}
+
+// legt ein Token an und gibt es genau einmal zurück — gespeichert wird nur sein Hash,
+// das Token selbst steht nirgends in der Datenbank (wie bei den Sessions)
+async function createApiToken(userId, name, days = null) {
+    const token = crypto.randomBytes(32).toString("base64url");
+    await db.query(`
+        INSERT INTO api_tokens (token_hash, user_id, name, expires_at)
+        VALUES ($1, $2, $3, CASE WHEN $4::int IS NULL THEN NULL
+                                 ELSE now() + make_interval(days => $4::int) END)`,
+        [tokenHash(token), userId, name, days]);
+    return token;
+}
+
+async function listApiTokens() {
+    const { rows } = await db.query(`
+        SELECT t.name, u.username, t.created_at, t.last_used_at, t.expires_at
+        FROM api_tokens t JOIN users u ON u.id = t.user_id
+        ORDER BY lower(u.username), lower(t.name)`);
+    return rows;
+}
+
+async function deleteApiToken(userId, name) {
+    const { rowCount } = await db.query(
+        "DELETE FROM api_tokens WHERE user_id = $1 AND lower(name) = lower($2)", [userId, name]);
+    return rowCount;
 }
 
 // checks username and password, starts a session and sets its cookie
@@ -168,4 +236,7 @@ async function logout(req, res) {
     res.setHeader("Set-Cookie", sessionCookie(req, "", 0));
 }
 
-module.exports = { hashPassword, checkPasswordRules, userFromRequest, login, logout };
+module.exports = {
+    hashPassword, checkPasswordRules, userFromRequest, login, logout,
+    createApiToken, listApiTokens, deleteApiToken,
+};

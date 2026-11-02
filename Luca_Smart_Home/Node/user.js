@@ -6,6 +6,12 @@
  *   sudo node user.js delete <name>
  *   sudo node user.js list
  *
+ * Dazu die Tokens, mit denen sich Programme statt Browser anmelden (der MCP-Server, mcp.js):
+ *
+ *   sudo node user.js token add <benutzer> <name> [tage]   zeigt das Token genau einmal
+ *   sudo node user.js token list
+ *   sudo node user.js token delete <benutzer> <name>
+ *
  * The database connection comes from the PG* environment variables or, if they are not set,
  * from /etc/luca-smart-home.env (written by the deploy, only readable by root, hence sudo).
  */
@@ -118,6 +124,13 @@ const COMMANDS = {
         console.log(`Benutzer „${user.username}“ gelöscht.`);
     },
 
+    // token add|list|delete, siehe TOKEN_COMMANDS
+    async token(sub, ...args) {
+        if (!Object.hasOwn(TOKEN_COMMANDS, sub ?? ""))
+            throw new Error("Benutzung: token add <benutzer> <name> [tage] | token list | token delete <benutzer> <name>");
+        await TOKEN_COMMANDS[sub](...args);
+    },
+
     async list() {
         const { rows } = await db.query(`
             SELECT u.username, u.created_at,
@@ -131,15 +144,57 @@ const COMMANDS = {
     },
 };
 
+// Tokens für Programme: das Token selbst steht nirgends in der Datenbank, nur sein Hash —
+// deshalb kann es auch nur einmal, beim Anlegen, angezeigt werden.
+const TOKEN_COMMANDS = {
+    async add(username, name, days) {
+        const user = await findUser(username);
+        if (!/^[A-Za-z0-9._-]{1,64}$/.test(name ?? ""))
+            throw new Error("Token-Name: 1–64 Zeichen aus Buchstaben, Zahlen, . _ -");
+        if (days !== undefined && !/^\d+$/.test(days))
+            throw new Error("Tage muss eine ganze Zahl sein");
+        const token = await auth.createApiToken(user.id, name, days === undefined ? null : Number(days));
+        console.log(`Token „${name}“ für „${user.username}“ angelegt`
+            + (days === undefined ? " (läuft nicht ab)" : `, läuft in ${days} Tag(en) ab`) + ".\n");
+        console.log(token);
+        console.log("\nJetzt notieren — es wird nie wieder angezeigt. Einhängen z. B. mit:");
+        console.log(`  claude mcp add --transport http rezepte https://<adresse>/api/mcp \\\n`
+            + `    --header "Authorization: Bearer ${token}"`);
+    },
+
+    async list() {
+        const tokens = await auth.listApiTokens();
+        if (tokens.length === 0)
+            console.log("Noch keine Tokens (anlegen: sudo node user.js token add <benutzer> <name>)");
+        for (const token of tokens) {
+            const used = token.last_used_at ? token.last_used_at.toLocaleString("de-DE") : "noch nie";
+            const expires = token.expires_at ? token.expires_at.toLocaleDateString("de-DE") : "nie";
+            console.log(`${token.name.padEnd(20)} ${token.username.padEnd(16)} benutzt ${used}, läuft ab ${expires}`);
+        }
+    },
+
+    async delete(username, name) {
+        const user = await findUser(username);
+        if (await auth.deleteApiToken(user.id, name ?? "") === 0)
+            throw new Error(`„${user.username}“ hat kein Token „${name}“`);
+        console.log(`Token „${name}“ von „${user.username}“ gelöscht.`);
+    },
+};
+
 async function main() {
-    const [command, name] = process.argv.slice(2);
-    if (!Object.hasOwn(COMMANDS, command) || (command !== "list" && !name)) {
-        console.log("Benutzung: sudo node user.js add|password|delete <name>\n           sudo node user.js list");
+    const [command, ...args] = process.argv.slice(2);
+    const needsName = command !== "list" && command !== "token";
+    if (!Object.hasOwn(COMMANDS, command) || (needsName && !args[0])) {
+        console.log("Benutzung: sudo node user.js add|password|delete <name>\n"
+            + "           sudo node user.js list\n"
+            + "           sudo node user.js token add <benutzer> <name> [tage]\n"
+            + "           sudo node user.js token list\n"
+            + "           sudo node user.js token delete <benutzer> <name>");
         process.exitCode = 1;
         return;
     }
     try {
-        await COMMANDS[command](name);
+        await COMMANDS[command](...args);
     } catch (err) {
         console.error(`Fehler: ${err.message}`);
         process.exitCode = 1;

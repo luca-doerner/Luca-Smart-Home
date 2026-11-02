@@ -1,8 +1,10 @@
 /*
- * Web server of the smart home: rooms, nested devices and their features.
+ * Web server of the smart home: rooms, nested devices and their features, plus the recipes.
  *
- * - pages: /rooms, /rooms/:id, /devices/:id (one page, public/index.html + public/app.js)
+ * - pages: /rooms, /rooms/:id, /devices/:id, /recipes, /recipes/:id, /pantry
+ *   (one page, public/index.html + public/app.js)
  * - features and their settings come from the database, their programs run in features.js
+ * - recipes, ingredients and the shopping list are in recipes.js and pantry.js
  * - everything except the login page needs a login (auth.js, users are added with user.js)
  *
  * Run (needs root, because the ambilight program needs root for the LEDs):
@@ -15,6 +17,8 @@
  *   PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE
  *                  PostgreSQL database (Database/schema.sql)
  *   UDP_HOST       receiver of the UDP messages of the services (default 127.0.0.1)
+ *   RECIPE_IMAGE_DIR
+ *                  folder of the recipe pictures (default /var/lib/luca-smart-home/recipe-images)
  */
 const http = require("http");
 const fs = require("fs");
@@ -25,11 +29,19 @@ const HttpError = require("./http-error");
 const { log, streamLog } = require("./log");
 const smarthome = require("./smarthome");
 const features = require("./features");
+const recipes = require("./recipes");
+const pantry = require("./pantry");
+const mcp = require("./mcp");
 
 /*************** Configuration ****************************************************************/
 const PORT = Number(process.env.PORT) || 5000;
 const HOST = process.env.HOST || undefined;
 const PUBLIC_DIR = path.join(__dirname, "public");
+
+// Größe einer JSON-Anfrage: ein Satz Einstellungen ist winzig, ein Rezept mit Zutaten und
+// Schritten braucht mehr Platz
+const MAX_JSON = 10000;
+const MAX_RECIPE_JSON = 100000;
 
 const MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -47,18 +59,28 @@ function sendJson(res, status, data) {
 }
 
 // only JSON: other pages cannot send JSON to this server without its permission (CORS), so
-// together with the SameSite cookie they cannot do anything in the name of a logged in user
-function readJson(req) {
+// together with the SameSite cookie they cannot do anything in the name of a logged in user.
+// limit: Standard MAX_JSON, Rezepte brauchen MAX_RECIPE_JSON. Ist die Anfrage zu groß, wird der
+// Rest weggeworfen und eine echte 413 geantwortet — die Verbindung einfach zu zerstören
+// (req.destroy) hätte dem Browser nur einen Netzwerkfehler ohne Grund hinterlassen.
+function readJson(req, limit = MAX_JSON) {
     if (!(req.headers["content-type"] ?? "").startsWith("application/json"))
         return Promise.reject(new HttpError(415, "Nur JSON wird angenommen"));
     return new Promise((resolve, reject) => {
         let body = "";
+        let tooBig = false;
         req.on("data", (chunk) => {
+            if (tooBig)
+                return;
             body += chunk;
-            if (body.length > 10000)
-                req.destroy(new Error("Anfrage zu groß"));
+            if (body.length > limit) {
+                tooBig = true;
+                reject(new HttpError(413, `Die Anfrage darf höchstens ${limit} Zeichen lang sein`));
+            }
         });
         req.on("end", () => {
+            if (tooBig)
+                return;
             try {
                 resolve(JSON.parse(body || "{}"));
             } catch {
@@ -67,6 +89,54 @@ function readJson(req) {
         });
         req.on("error", reject);
     });
+}
+
+// rohe Bytes, für den Bild-Upload: der geht an readJson vorbei.
+// Nur image/* wird angenommen — das ist kein Typ, den ein fremdes Formular senden kann, also
+// bleibt der CSRF-Schutz von readJson auch hier erhalten.
+function readImageBody(req, limit) {
+    if (!(req.headers["content-type"] ?? "").startsWith("image/"))
+        return Promise.reject(new HttpError(415, "Content-Type muss image/... sein"));
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        let tooBig = false;
+        req.on("data", (chunk) => {
+            if (tooBig)
+                return;
+            size += chunk.length;
+            if (size > limit) {
+                tooBig = true;
+                return reject(new HttpError(413, `Das Bild darf höchstens ${limit / 1024 / 1024} MB groß sein`));
+            }
+            chunks.push(chunk);
+        });
+        req.on("end", () => {
+            if (!tooBig)
+                resolve(Buffer.concat(chunks));
+        });
+        req.on("error", reject);
+    });
+}
+
+// Rezeptbild: ETag aus image_updated_at, damit der Browser es nur nach einer Änderung neu lädt.
+// private: das Bild gehört zu einem angemeldeten Benutzer, Cloudflare darf es nicht für andere
+// zwischenspeichern.
+async function sendImage(req, res, id) {
+    const image = await recipes.readImage(id);
+    const etag = `"${image.updatedAt.getTime().toString(16)}"`;
+    const headers = {
+        "Content-Type": image.mime,
+        "Cache-Control": "private, max-age=3600",
+        ETag: etag,
+        "X-Content-Type-Options": "nosniff",
+    };
+    if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, headers);
+        return res.end();
+    }
+    res.writeHead(200, { ...headers, "Content-Length": image.data.length });
+    res.end(image.data);
 }
 
 // files from public/, only plain names like "app.js" or "feature-panel.js";
@@ -138,7 +208,8 @@ const ROUTES = [
 
     // pages (the page itself loads its data from the API)
     ["GET", /^\/$/, (req, res) => redirect(res, "/rooms")],
-    ["GET", /^\/(rooms|rooms\/\d+|devices\/\d+)$/, (req, res) => serveFile(req, res, "index.html")],
+    ["GET", /^\/(rooms|rooms\/\d+|devices\/\d+|recipes|recipes\/new|recipes\/\d+|pantry)$/,
+        (req, res) => serveFile(req, res, "index.html")],
     // old address of the ambilight page
     ["GET", /^\/ambilight$/, async (req, res) => {
         const { rows: [feature] } = await db.query("SELECT id, device_id FROM features WHERE type = 'ambilight' ORDER BY id LIMIT 1");
@@ -189,6 +260,83 @@ const ROUTES = [
         const result = await features.applySettings(Number(id), values);
         sendJson(res, 200, { ...result, state: await featureState(Number(id)) });
     }],
+
+    /*
+     * Rezepte und Vorrat (recipes.js, pantry.js).
+     *
+     * Nur GET und POST: api() in public/lib.js kennt nichts anderes, deshalb heißt Löschen hier
+     * POST .../delete und nicht DELETE. Zutaten werden überall über ihren Namen angesprochen,
+     * nicht über eine id, damit auch ein KI-Agent (mcp.js) ohne Vorarbeit speichern kann.
+     */
+    ["GET", /^\/api\/recipes$/, async (req, res) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, {
+            recipes: await recipes.listRecipes({
+                q: searchParams.get("q"),
+                tag: searchParams.get("tag"),
+                limit: searchParams.get("limit"),
+            }),
+        });
+    }],
+    ["POST", /^\/api\/recipes$/, async (req, res) => {
+        const { recipe } = await readJson(req, MAX_RECIPE_JSON);
+        sendJson(res, 201, { recipe: await recipes.saveRecipe(null, recipe, req.user.id) });
+    }],
+    ["GET", /^\/api\/recipes\/(\d+)$/, async (req, res, id) =>
+        sendJson(res, 200, { recipe: await recipes.getRecipe(Number(id)) })],
+    ["POST", /^\/api\/recipes\/(\d+)$/, async (req, res, id) => {
+        const { recipe } = await readJson(req, MAX_RECIPE_JSON);
+        sendJson(res, 200, { recipe: await recipes.saveRecipe(Number(id), recipe, req.user.id) });
+    }],
+    ["POST", /^\/api\/recipes\/(\d+)\/delete$/, async (req, res, id) => {
+        await readJson(req);
+        sendJson(res, 200, await recipes.deleteRecipe(Number(id)));
+    }],
+    // ?servings=6 rechnet die Mengen auf andere Portionen um
+    ["GET", /^\/api\/recipes\/(\d+)\/ingredients$/, async (req, res, id) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, await recipes.getRecipeIngredients(Number(id), searchParams.get("servings")));
+    }],
+    ["GET", /^\/api\/recipes\/(\d+)\/shopping-list$/, async (req, res, id) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, await recipes.getShoppingList(Number(id), searchParams.get("servings")));
+    }],
+    // das Bild kommt als rohe Bytes, der Typ wird an den ersten Bytes geprüft (recipes.js)
+    ["POST", /^\/api\/recipes\/(\d+)\/image$/, async (req, res, id) => {
+        const body = await readImageBody(req, recipes.MAX_IMAGE_BYTES);
+        sendJson(res, 200, await recipes.saveImage(Number(id), body));
+    }],
+    ["GET", /^\/api\/recipes\/(\d+)\/image$/, (req, res, id) => sendImage(req, res, Number(id))],
+    ["POST", /^\/api\/recipes\/(\d+)\/image\/delete$/, async (req, res, id) => {
+        await readJson(req);
+        sendJson(res, 200, await recipes.deleteImage(Number(id)));
+    }],
+
+    ["GET", /^\/api\/ingredients$/, async (req, res) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, { ingredients: await recipes.listIngredients(searchParams.get("q")) });
+    }],
+    ["POST", /^\/api\/ingredients$/, async (req, res) =>
+        sendJson(res, 201, { ingredient: await recipes.createIngredient(await readJson(req)) })],
+    ["GET", /^\/api\/tags$/, async (req, res) => sendJson(res, 200, { tags: await recipes.listTags() })],
+
+    ["GET", /^\/api\/pantry$/, async (req, res) => sendJson(res, 200, { items: await pantry.listPantry() })],
+    ["POST", /^\/api\/pantry$/, async (req, res) =>
+        sendJson(res, 200, { item: await pantry.setPantryItem(await readJson(req)) })],
+    ["POST", /^\/api\/pantry\/(\d+)\/delete$/, async (req, res, id) => {
+        await readJson(req);
+        sendJson(res, 200, await pantry.removePantryItem(Number(id)));
+    }],
+
+    /*
+     * MCP: die Rezepte als Werkzeuge für eine KI (mcp.js). Eine Route, JSON-RPC über POST.
+     * Die Anmeldung läuft wie überall über auth.js — ein Programm schickt dafür
+     * "Authorization: Bearer <token>" statt eines Cookies.
+     */
+    ["POST", /^\/api\/mcp$/, async (req, res) =>
+        mcp.handlePost(req, res, await readJson(req, MAX_RECIPE_JSON))],
+    ["GET", /^\/api\/mcp$/, (req, res) => mcp.methodNotAllowed(res)],
+    ["DELETE", /^\/api\/mcp$/, (req, res) => mcp.methodNotAllowed(res)],
 
     // output of the feature programs and server messages as Server-Sent Events
     ["GET", /^\/api\/log$/, (req, res) => streamLog(req, res)],

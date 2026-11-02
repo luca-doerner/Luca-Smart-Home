@@ -5,6 +5,9 @@
     smart_home_dir: "/home/{{ ansible_user }}/Luca_Smart_Home"
     smart_home_service: luca-smart-home
     smart_home_port: 5000
+    # Rezeptbilder: bewusst außerhalb von smart_home_dir, sonst würde der Kopierschritt unten
+    # sie bei jedem Deploy löschen
+    smart_home_image_dir: "/var/lib/luca-smart-home/recipe-images"
     # PostgreSQL database for the settings, the password comes from the GitHub secret DB_PASSWORD
     smart_home_db_user: "{{ lookup('env', 'DB_USER') | default('luca', true) }}"
     smart_home_db_name: "{{ lookup('env', 'DB_NAME') | default('smarthome', true) }}"
@@ -81,6 +84,15 @@
       become_user: "{{ ansible_user }}"
 
     ################ Start the Node server ################
+    # der Server läuft als root (LEDs), deshalb gehört der Ordner root
+    - name: Create the folder for the recipe pictures
+      file:
+        path: "{{ smart_home_image_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
     # only readable by root, because it contains the database password
     - name: Write database connection for the Node server
       copy:
@@ -92,6 +104,7 @@
           PGUSER={{ smart_home_db_user }}
           PGDATABASE={{ smart_home_db_name }}
           PGPASSWORD={{ smart_home_db_password }}
+          RECIPE_IMAGE_DIR={{ smart_home_image_dir }}
       no_log: true
 
     - name: Install systemd service for the Node server
@@ -110,6 +123,10 @@
           WorkingDirectory={{ smart_home_dir }}/Node
           ExecStart=/usr/bin/env node {{ smart_home_dir }}/Node/server.js
           Environment=PORT={{ smart_home_port }}
+          # nur über den Cloudflare-Tunnel erreichbar (cloudflared läuft auf dem Pi selbst),
+          # nicht mehr offen im Heimnetz; die Gesundheitsprüfung unten geht weiter, sie fragt
+          # auch 127.0.0.1
+          Environment=HOST=127.0.0.1
           EnvironmentFile=/etc/{{ smart_home_service }}.env
           Restart=on-failure
           RestartSec=5

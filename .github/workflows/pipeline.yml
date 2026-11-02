@@ -6,6 +6,13 @@ on:
       - main
   workflow_dispatch:
 
+# Zwei Deploys dürfen sich nicht überholen: der zweite wartet, bis der erste fertig ist.
+# cancel-in-progress bleibt aus — ein abgebrochener Deploy ließe den Pi mit gestopptem Dienst
+# und halb kopierten Dateien zurück.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

@@ -1,4 +1,5 @@
--- Smart home database: rooms -> devices (nestable) -> features -> settings
+-- Smart home database: rooms -> devices (nestable) -> features -> settings,
+-- plus the recipes: ingredients -> recipes -> recipe_ingredients / recipe_steps / pantry_items
 --
 -- Can be run again at any time (every deploy runs it), it only creates what is missing.
 -- Needs PostgreSQL 15 or newer (UNIQUE NULLS NOT DISTINCT).
@@ -268,3 +269,152 @@ WITH RECURSIVE tree AS (
     JOIN tree t ON d.parent_device_id = t.id
 )
 SELECT * FROM tree;
+
+-- ############################################################################################
+-- Recipes: ingredients -> recipes -> recipe_ingredients / recipe_steps, plus pantry_items
+--
+-- This is the first part of the page that is not a device, so it needs its own tables: the
+-- settings system above is built for the numbers and colors of an LED program, not for lists of
+-- ingredients. The patterns are the same though: IDENTITY ids, created_at, and uniqueness
+-- through a functional index on lower(name) like users_username_idx.
+-- ############################################################################################
+
+-- catalogue of ingredients; every ingredient exists only once and is used by the recipes and by
+-- the pantry, that is what makes "take what is at home off the shopping list" possible
+CREATE TABLE IF NOT EXISTS ingredients (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name         TEXT NOT NULL,
+    category     TEXT,              -- free text, e.g. "Gemüse", only used to sort the list
+    default_unit TEXT,              -- suggested in the form, e.g. "g" for Mehl
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- "Mehl" and "mehl" are the same ingredient
+CREATE UNIQUE INDEX IF NOT EXISTS ingredients_name_idx ON ingredients (lower(name));
+
+-- a recipe; its ingredients and its steps are in their own tables below
+--
+-- servings:         what the amounts in recipe_ingredients belong to, the page scales from here
+-- tags:             ["Hauptgericht", "vegetarisch"], searched with tags && ARRAY[...]
+-- image_mime:       NULL = no picture; the file itself is not in the database (see db.js max: 1),
+--                   it lies in RECIPE_IMAGE_DIR/<id>.<ext>
+-- image_updated_at: the browser only has to load a picture again when this changes (ETag)
+CREATE TABLE IF NOT EXISTS recipes (
+    id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name             TEXT NOT NULL,
+    description      TEXT,
+    servings         INTEGER NOT NULL DEFAULT 4 CHECK (servings > 0),
+    prep_minutes     INTEGER CHECK (prep_minutes >= 0),
+    cook_minutes     INTEGER CHECK (cook_minutes >= 0),
+    difficulty       TEXT,              -- einfach / mittel / schwer, see the rule at the end of the file
+    tags             TEXT[] NOT NULL DEFAULT '{}',
+    source           TEXT,              -- where it comes from, e.g. a link or "Oma"
+    notes            TEXT,
+    image_mime       TEXT,
+    image_updated_at TIMESTAMPTZ,
+    created_by       BIGINT REFERENCES users (id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS recipes_name_idx ON recipes (lower(name));
+
+-- tags && ARRAY['vegetarisch'] uses this index instead of reading every recipe
+CREATE INDEX IF NOT EXISTS recipes_tags_idx ON recipes USING GIN (tags);
+
+-- the ingredients of a recipe in their order
+--
+-- The primary key is (recipe_id, position) and not an id of its own: the order is part of what
+-- an entry is, and saving replaces the whole list anyway (DELETE + INSERT), so an extra id would
+-- only be ballast.
+-- ON DELETE RESTRICT: an ingredient a recipe uses cannot be deleted from the catalogue by
+-- accident, the recipe would lose a line.
+-- amount NULL means "no amount", e.g. "etwas Öl"; scaling leaves those alone.
+CREATE TABLE IF NOT EXISTS recipe_ingredients (
+    recipe_id     BIGINT NOT NULL REFERENCES recipes (id) ON DELETE CASCADE,
+    position      INTEGER NOT NULL CHECK (position > 0),
+    ingredient_id BIGINT NOT NULL REFERENCES ingredients (id) ON DELETE RESTRICT,
+    amount        DOUBLE PRECISION CHECK (amount > 0),
+    unit          TEXT,              -- "g", "ml", "EL", NULL = pieces
+    note          TEXT,              -- "fein gewürfelt"
+    group_label   TEXT,              -- heading inside the list, e.g. "Für die Soße"
+    optional      BOOLEAN NOT NULL DEFAULT false,
+    PRIMARY KEY (recipe_id, position)
+);
+
+-- for ON DELETE RESTRICT and for "which recipes use this ingredient"
+CREATE INDEX IF NOT EXISTS recipe_ingredients_ingredient_idx ON recipe_ingredients (ingredient_id);
+
+-- the steps of a recipe in their order, same primary key reasoning as above ("Schritt 3")
+CREATE TABLE IF NOT EXISTS recipe_steps (
+    recipe_id BIGINT NOT NULL REFERENCES recipes (id) ON DELETE CASCADE,
+    position  INTEGER NOT NULL CHECK (position > 0),
+    text      TEXT NOT NULL,
+    minutes   INTEGER CHECK (minutes >= 0),   -- how long this step takes, NULL = not said
+    PRIMARY KEY (recipe_id, position)
+);
+
+-- what is at home. ingredient_id is the primary key itself, so an ingredient can be in the
+-- pantry at most once - that is what makes taking it off a shopping list unambiguous.
+-- always_available: "it is always there" (Salz, Pfeffer, Öl), nothing to count;
+-- amount / unit:    optional, for the things that do run out
+CREATE TABLE IF NOT EXISTS pantry_items (
+    ingredient_id    BIGINT PRIMARY KEY REFERENCES ingredients (id) ON DELETE CASCADE,
+    always_available BOOLEAN NOT NULL DEFAULT false,
+    amount           DOUBLE PRECISION CHECK (amount >= 0),
+    unit             TEXT,
+    note             TEXT,
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- tokens for programs instead of browsers (the MCP server, Node/mcp.js): same technique as
+-- sessions, only the SHA-256 hash of the token is stored. Deliberately not a row in sessions:
+-- the login deletes expired rows there, and a machine token should not be swept away together
+-- with the browsers of a user.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    token_hash   TEXT PRIMARY KEY,
+    user_id      BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,     -- what it is for, e.g. "claude-code"
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    expires_at   TIMESTAMPTZ        -- NULL = never runs out
+);
+
+CREATE INDEX IF NOT EXISTS api_tokens_user_id_idx ON api_tokens (user_id);
+
+-- so "user.js token delete <benutzer> <name>" always means exactly one token
+CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_user_name_idx ON api_tokens (user_id, lower(name));
+
+-- Full text search over the name, the tags, the ingredients and the text of a recipe.
+--
+-- A view and not a stored tsvector column: the text comes from three tables, a GENERATED column
+-- can only see its own row, and a trigger on three tables is work without a win for a few
+-- hundred recipes. CREATE OR REPLACE VIEW is idempotent by itself, which fits the deploy rule.
+-- The weights A-D are the reason why a hit in the name beats a hit in the instructions:
+-- A name, B tags and ingredients, C description, D steps.
+CREATE OR REPLACE VIEW recipes_search AS
+SELECT r.id,
+       setweight(to_tsvector('german', r.name), 'A')
+    || setweight(to_tsvector('german', array_to_string(r.tags, ' ')), 'B')
+    || setweight(to_tsvector('german', coalesce(zutaten.names, '')), 'B')
+    || setweight(to_tsvector('german', coalesce(r.description, '')), 'C')
+    || setweight(to_tsvector('german', coalesce(schritte.texts, '')), 'D') AS document
+FROM recipes r
+LEFT JOIN (
+    SELECT ri.recipe_id, string_agg(i.name || ' ' || coalesce(ri.note, ''), ' ') AS names
+    FROM recipe_ingredients ri
+    JOIN ingredients i ON i.id = ri.ingredient_id
+    GROUP BY ri.recipe_id
+) AS zutaten ON zutaten.recipe_id = r.id
+LEFT JOIN (
+    SELECT recipe_id, string_agg(text, ' ') AS texts
+    FROM recipe_steps
+    GROUP BY recipe_id
+) AS schritte ON schritte.recipe_id = r.id;
+
+-- Replaced on every run, like the rules of the setting definitions above: CREATE TABLE IF NOT
+-- EXISTS does not change a table that is already there, so a new level of difficulty would never
+-- reach the Pi. Dropping and adding the rule every time is what keeps it changeable.
+ALTER TABLE recipes DROP CONSTRAINT IF EXISTS recipes_difficulty_check;
+ALTER TABLE recipes ADD CONSTRAINT recipes_difficulty_check
+    CHECK (difficulty IS NULL OR difficulty IN ('einfach', 'mittel', 'schwer'));

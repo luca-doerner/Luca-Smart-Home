@@ -1,20 +1,33 @@
-// the smart home page: navigation on the left, pages /rooms, /rooms/:id and /devices/:id
-import { api, el, errorBox, icon } from "./lib.js";
+// the smart home page: navigation on the left, pages /rooms, /rooms/:id, /devices/:id
+// und die Rezepte (/recipes, /recipes/:id, /recipes/new, /pantry) aus recipes.js / pantry.js
+import { api, breadcrumb, cardGrid, el, errorBox, icon, plural, showPage } from "./lib.js";
 import { renderFeature, settingsForm } from "./feature-panel.js";
+import { renderRecipeEditPage, renderRecipePage, renderRecipesPage } from "./recipes.js";
+import { renderPantryPage } from "./pantry.js";
 
 const EXPANDED_KEY = "smarthome.expanded";
 const DEVICE_POLL_MS = 5000;   // how often the dots of the feature tabs are updated
-const main = document.getElementById("main");
 const sidebar = document.getElementById("sidebar");
 
 /*************** Route ************************************************************************/
-// key of a navigation entry: "rooms", "room:<id>" or "device:<id>"
+// key of a navigation entry: "rooms", "room:<id>", "device:<id>", "recipes" or "pantry"
 function currentRoute() {
-    const [, page, id] = location.pathname.match(/^\/(rooms|devices)(?:\/(\d+))?$/) || [];
+    const [, page, id] = location.pathname.match(/^\/(rooms|devices|recipes|pantry)(?:\/(new|\d+))?$/) || [];
     if (page === "devices" && id)
         return { page: "device", id: Number(id), key: `device:${id}` };
     if (page === "rooms" && id)
         return { page: "room", id: Number(id), key: `room:${id}` };
+    if (page === "pantry")
+        return { page: "pantry", key: "pantry" };
+    if (page === "recipes" && id === "new")
+        return { page: "recipe-edit", id: null, key: "recipes" };
+    if (page === "recipes" && id)
+        // ?edit=1 zeigt dasselbe Rezept im Bearbeiten-Modus
+        return new URLSearchParams(location.search).has("edit")
+            ? { page: "recipe-edit", id: Number(id), key: "recipes" }
+            : { page: "recipe", id: Number(id), key: "recipes" };
+    if (page === "recipes")
+        return { page: "recipes", key: "recipes" };
     return { page: "rooms", key: "rooms" };
 }
 
@@ -43,22 +56,28 @@ function deviceEntry(device) {
         children: device.children.map(deviceEntry) };
 }
 
+// Die Navigation hat mehrere Wurzeln: die Zimmer mit ihrem Baum, dazu Rezepte und Vorrat.
+// (Vorher war es genau eine Wurzel — Rezepte sind das erste, was kein Gerät ist.)
 function navigationEntries(tree) {
-    return {
-        key: "rooms", label: "Zimmer", href: "/rooms", icon: "home",
-        children: tree.map((room) => ({
-            key: `room:${room.id}`, label: room.name, href: `/rooms/${room.id}`,
-            children: room.devices.map(deviceEntry),
-        })),
-    };
+    return [
+        {
+            key: "rooms", label: "Zimmer", href: "/rooms", icon: "home",
+            children: tree.map((room) => ({
+                key: `room:${room.id}`, label: room.name, href: `/rooms/${room.id}`,
+                children: room.devices.map(deviceEntry),
+            })),
+        },
+        { key: "recipes", label: "Rezepte", href: "/recipes", icon: "book", children: [] },
+        { key: "pantry", label: "Vorrat", href: "/pantry", icon: "pantry", children: [] },
+    ];
 }
 
-// keys from the top entry down to the entry with the key, null if it is not in the tree
-function pathTo(entry, key) {
-    if (entry.key === key)
-        return [key];
-    for (const child of entry.children) {
-        const path = pathTo(child, key);
+// keys from a top entry down to the entry with the key, null if it is in none of them
+function pathTo(entries, key) {
+    for (const entry of entries) {
+        if (entry.key === key)
+            return [entry.key];
+        const path = pathTo(entry.children, key);
         if (path)
             return [entry.key, ...path];
     }
@@ -81,9 +100,9 @@ function pinnedSection(pinned) {
 // navigation: { rooms: tree, pinned: [devices] } from /api/navigation
 function renderNavigation(navigation) {
     const expanded = loadExpanded();
-    const root = navigationEntries(navigation.rooms);
+    const roots = navigationEntries(navigation.rooms);
     // the current page and everything above it is always expanded
-    for (const key of pathTo(root, route.key) ?? [])
+    for (const key of pathTo(roots, route.key) ?? [])
         expanded.add(key);
     saveExpanded(expanded);
 
@@ -120,7 +139,8 @@ function renderNavigation(navigation) {
         return el("li", {}, el("div", { class: "tree-row", style: `--level: ${level}` }, toggle, link), children);
     }
 
-    sidebar.replaceChildren(...[pinnedSection(navigation.pinned), el("ul", { class: "tree" }, entry(root, 0))]
+    sidebar.replaceChildren(...[pinnedSection(navigation.pinned),
+        el("ul", { class: "tree" }, roots.map((root) => entry(root, 0)))]
         .filter((part) => part !== null));
 }
 
@@ -153,34 +173,14 @@ async function setupUser() {
 }
 
 /*************** Page Parts *******************************************************************/
-// replaces the content of the page, empty parts (null) are left out
-function showPage(...parts) {
-    main.replaceChildren(...parts.filter((part) => part !== null));
-}
-
-// items: [{ label, href }], the last one is the current page (no link)
-function breadcrumb(items) {
-    return el("nav", { class: "breadcrumb", "aria-label": "Pfad" },
-        el("ol", {}, items.map((item, i) => el("li", {},
-            i < items.length - 1
-                ? el("a", { href: item.href }, item.label)
-                : el("span", { "aria-current": "page" }, item.label)))));
-}
-
-function plural(count, one, many) {
-    return `${count} ${count === 1 ? one : many}`;
-}
-
+// showPage, breadcrumb, cardGrid und plural stehen in lib.js, weil die Rezeptseiten sie auch
+// brauchen (recipes.js, pantry.js)
 function deviceCard(device) {
     const meta = [plural(device.child_count, "Untergerät", "Untergeräte"), plural(device.feature_count, "Feature", "Features")];
     return el("a", { class: "card link-card", href: `/devices/${device.id}` },
         el("h3", {}, device.name),
         device.type ? el("span", { class: "badge" }, device.type) : null,
         el("p", { class: "muted" }, meta.join(" · ")));
-}
-
-function cardGrid(cards, emptyText) {
-    return cards.length > 0 ? el("div", { class: "card-grid" }, cards) : el("p", { class: "empty" }, emptyText);
 }
 
 /*************** Pages ************************************************************************/
@@ -405,12 +405,22 @@ async function init() {
             renderRoomsPage(navigation);
         else if (route.page === "room")
             renderRoomPage(await pageData);
-        else
+        else if (route.page === "device")
             await renderDevicePage(await pageData);
+        // die Rezeptseiten holen sich ihre Daten selbst, sie haben mehrere Quellen
+        else if (route.page === "recipes")
+            await renderRecipesPage();
+        else if (route.page === "recipe")
+            await renderRecipePage(route.id);
+        else if (route.page === "recipe-edit")
+            await renderRecipeEditPage(route.id);
+        else if (route.page === "pantry")
+            await renderPantryPage();
     } catch (err) {
         const errors = errorBox();
         errors.show("page", `Seite konnte nicht geladen werden: ${err.message}`);
-        showPage(breadcrumb([{ label: "Zimmer", href: "/rooms" }, { label: "Fehler" }]), errors.node);
+        const home = route.key === "rooms" ? { label: "Zimmer", href: "/rooms" } : { label: "Rezepte", href: "/recipes" };
+        showPage(breadcrumb([home, { label: "Fehler" }]), errors.node);
     }
 }
 

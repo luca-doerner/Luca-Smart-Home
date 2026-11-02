@@ -933,6 +933,402 @@ code {
     white-space: pre-line;
 }
 
+
+/*************** Rezepte und Vorrat ***********************************************************/
+/* Felder der Rezept- und Vorratsformulare. Die Einstellungen oben stehen in einem Raster
+   (Beschriftung links, Feld rechts); hier steht die Beschriftung über dem Feld, weil ein
+   Rezeptformular viele und unterschiedlich breite Felder hat. */
+.form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    margin-bottom: 12px;
+}
+
+.form-field > label {
+    font-size: 0.9rem;
+    color: var(--muted);
+}
+
+.field-hint {
+    margin: 0;
+    font-size: 0.85rem;
+}
+
+/* mehrere Felder nebeneinander, solange Platz ist */
+.form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.form-row > .form-field {
+    flex: 1 1 140px;
+}
+
+/* Eingabefelder der neuen Formulare und Listen: wie die der Einstellungen, aber ohne das
+   Raster — deshalb eine eigene Regel statt .setting-row */
+.form-field input,
+.form-field select,
+.form-field textarea,
+.row-list input,
+.row-list textarea,
+.pantry-row input {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 10px;
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.form-field textarea,
+.row-list textarea {
+    resize: vertical;
+    line-height: 1.4;
+}
+
+.form-field input:focus,
+.form-field select:focus,
+.form-field textarea:focus,
+.row-list input:focus,
+.row-list textarea:focus,
+.pantry-row input:focus,
+.search-row input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.form-field input:invalid,
+.row-list input:invalid,
+.pantry-row input:invalid {
+    border-color: var(--error-text);
+}
+
+/* Datei-Auswahl für das Rezeptbild */
+input[type="file"] {
+    max-width: 100%;
+    padding: 6px;
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+input[type="file"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+/* Kästchen mit Text daneben, z. B. „optional“ */
+.inline-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    color: var(--muted);
+}
+
+.inline-check input {
+    width: auto;
+    accent-color: var(--accent);
+}
+
+/*************** Listen mit Reihenfolge (Zutaten, Schritte) ***********************************/
+.row-list {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+    counter-reset: row;
+}
+
+.row-list-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+    counter-increment: row;
+}
+
+/* die Nummer steht vor der Zeile, damit „Schritt 3“ auch beim Sortieren stimmt */
+.row-list-row::before {
+    content: counter(row) ".";
+    flex-shrink: 0;
+    padding-top: 10px;
+    width: 2.2ch;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.row-list-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Breiten der Zutatenfelder: Name breit, Menge und Einheit schmal, Hinweis und Gruppe dahinter */
+.row-list-fields .ingredient-name { flex: 2 1 150px; }
+.row-list-fields .ingredient-amount { flex: 0 1 90px; }
+.row-list-fields .ingredient-unit { flex: 0 1 90px; }
+.row-list-fields input:not([class]) { flex: 1 1 130px; }
+.row-list-fields textarea { flex: 3 1 220px; }
+.row-list-fields .step-minutes { flex: 0 1 80px; }
+
+.row-list-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.row-list-empty {
+    padding: 8px 0;
+}
+
+.row-list-empty::before {
+    content: none;
+}
+
+/*************** Rezept ansehen ***************************************************************/
+.search-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.search-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.search-row .muted {
+    margin: 0;
+    white-space: nowrap;
+}
+
+.tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 0;
+}
+
+a.badge {
+    text-decoration: none;
+}
+
+a.badge:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* Bild: nie breiter als die Spalte, Seitenverhältnis bleibt */
+.recipe-image {
+    display: block;
+    width: 100%;
+    max-height: 360px;
+    margin-bottom: 16px;
+    object-fit: cover;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+.recipe-image-box .recipe-image {
+    max-height: 240px;
+    margin-bottom: 12px;
+}
+
+/* Das Bild liegt oben auf der Karte und nicht daneben: daneben bliebe für den Text in einer
+   220px-Spalte zu wenig übrig, und „4 Portionen · 75 min“ würde umbrechen. */
+.recipe-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.recipe-card > div {
+    min-width: 0;
+}
+
+.recipe-thumb {
+    width: 100%;
+    height: 110px;
+    object-fit: cover;
+    border-radius: 8px;
+}
+
+/* die Beschreibung auf der Karte soll die Karten nicht unterschiedlich hoch machen */
+.recipe-card-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    margin: 4px 0 0;
+    font-size: 0.9rem;
+}
+
+/* Portionsrechner über den Zutaten */
+.portions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.portions h3 {
+    margin: 0;
+}
+
+.portions-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.portions-control input {
+    width: 72px;
+    padding: 6px 8px;
+    font: inherit;
+    text-align: center;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.portions-control input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.portions-control label {
+    color: var(--muted);
+}
+
+/* Zutaten: Menge in einer eigenen Spalte, damit die Namen untereinander anfangen */
+.ingredient-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+}
+
+.ingredient-list li {
+    display: grid;
+    grid-template-columns: 7em minmax(0, 1fr);
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.ingredient-list li:last-child {
+    border-bottom: 0;
+}
+
+.ingredient-amount-text {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.ingredient-list .badge {
+    margin-left: 6px;
+    font-size: 0.75rem;
+}
+
+.step-list {
+    margin: 8px 0 0;
+    padding-left: 1.4em;
+}
+
+.step-list li {
+    margin-bottom: 10px;
+}
+
+.step-list .badge {
+    margin-left: 8px;
+    font-size: 0.75rem;
+}
+
+.button.danger {
+    color: var(--error-text);
+    background: var(--error-bg);
+    border-color: var(--error-text);
+}
+
+/*************** Vorrat ***********************************************************************/
+.pantry-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+}
+
+/* Name | immer da | Menge + Einheit | Notiz | ✕ */
+.pantry-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 1.2fr) minmax(0, 0.9fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.pantry-row:last-child {
+    border-bottom: 0;
+}
+
+.pantry-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pantry-always {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+/* der Schalter darf hier kleiner sein als der Ein/Aus-Schalter eines Features */
+.pantry-always .track {
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+}
+
+.pantry-always .thumb {
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+}
+
+.pantry-always input:checked + .track .thumb {
+    transform: translateX(20px);
+}
+
+.pantry-amount {
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+}
+
+.pantry-row input:disabled {
+    opacity: 0.5;
+}
 /*************** Small Screens ****************************************************************/
 @media (max-width: 768px) {
     .menu-toggle {
@@ -976,5 +1372,58 @@ code {
         grid-template-columns: minmax(0, 1fr);
         gap: 4px;
         margin-bottom: 12px;
+    }
+
+    /* Zutaten- und Schrittzeilen: die Felder untereinander, die Knöpfe daneben */
+    .row-list-fields .ingredient-name,
+    .row-list-fields .ingredient-amount,
+    .row-list-fields .ingredient-unit,
+    .row-list-fields input:not([class]),
+    .row-list-fields textarea,
+    .row-list-fields .step-minutes {
+        flex-basis: 100%;
+    }
+
+    /* Menge und Einheit bleiben nebeneinander, das sind zwei kurze Felder */
+    .row-list-fields .ingredient-amount,
+    .row-list-fields .ingredient-unit {
+        flex: 1 1 40%;
+    }
+
+    .row-list-row {
+        align-items: stretch;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .row-list-actions {
+        flex-direction: column;
+    }
+
+    /* Vorrat: eine Zeile wird zu einem kleinen Block — Name und ✕ oben, darunter der Rest */
+    .pantry-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+    }
+
+    .pantry-name {
+        grid-area: 1 / 1;
+    }
+
+    .pantry-row > button {
+        grid-area: 1 / 2;
+    }
+
+    .pantry-always {
+        grid-area: 2 / 1 / 2 / -1;
+    }
+
+    .pantry-row > .pantry-amount,
+    .pantry-row > input {
+        grid-column: 1 / -1;
+    }
+
+    .ingredient-list li {
+        grid-template-columns: 5.5em minmax(0, 1fr);
     }
 }
