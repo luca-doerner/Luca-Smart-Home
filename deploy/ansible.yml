@@ -15,10 +15,6 @@
     # öffentliche Adresse für die OAuth-Metadaten (oauth.js), optional: ohne sie wird die Adresse
     # der Anfrage benutzt, was hinter dem Cloudflare-Tunnel normalerweise stimmt
     smart_home_public_url: "{{ lookup('env', 'PUBLIC_URL') }}"
-    # Bring! (bring.js): optional, ohne die Secrets fehlt nur der Bring!-Teil, der Deploy läuft
-    smart_home_bring_email: "{{ lookup('env', 'BRING_EMAIL') }}"
-    smart_home_bring_password: "{{ lookup('env', 'BRING_PASSWORD') }}"
-    smart_home_bring_list_uuid: "{{ lookup('env', 'BRING_LIST_UUID') }}"
   tasks:
     - name: Check that the database password is set
       assert:
@@ -114,13 +110,6 @@
           RECIPE_IMAGE_DIR={{ smart_home_image_dir }}
           {% if smart_home_public_url | length > 0 %}
           PUBLIC_URL={{ smart_home_public_url }}
-          {% endif %}
-          {% if smart_home_bring_email | length > 0 and smart_home_bring_password | length > 0 %}
-          BRING_EMAIL={{ smart_home_bring_email }}
-          BRING_PASSWORD={{ smart_home_bring_password }}
-          {% endif %}
-          {% if smart_home_bring_list_uuid | length > 0 %}
-          BRING_LIST_UUID={{ smart_home_bring_list_uuid }}
           {% endif %}
       no_log: true
 

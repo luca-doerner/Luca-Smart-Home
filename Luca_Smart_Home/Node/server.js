@@ -21,9 +21,9 @@
  *                  folder of the recipe pictures (default /var/lib/luca-smart-home/recipe-images)
  *   PUBLIC_URL     (optional) public address, e.g. https://home.example.com; used by the OAuth
  *                  metadata (oauth.js). Without it the address of the request is used.
- *   BRING_EMAIL, BRING_PASSWORD, BRING_LIST_UUID
- *                  Bring! shopping list (bring.js); without them only the Bring! buttons and
- *                  tools answer "nicht eingerichtet", everything else works
+ *   SECRET_KEY / SECRET_KEY_FILE
+ *                  key that encrypts the Bring! logins in the database (bring.js); without
+ *                  SECRET_KEY a key file is created (default /var/lib/luca-smart-home/secret.key)
  */
 const http = require("http");
 const fs = require("fs");
@@ -208,6 +208,12 @@ async function serveFile(req, res, file) {
     res.end(await fs.promises.readFile(fullPath));
 }
 
+// nur wer sich im Browser mit Benutzername und Passwort angemeldet hat, nicht mit einem Token
+function requireBrowserLogin(req) {
+    if (req.user.viaToken)
+        throw new HttpError(403, "Das geht nur mit einer Anmeldung im Browser");
+}
+
 function redirect(res, location) {
     res.writeHead(302, { Location: location });
     res.end();
@@ -244,7 +250,7 @@ const ROUTES = [
 
     // pages (the page itself loads its data from the API)
     ["GET", /^\/$/, (req, res) => redirect(res, "/rooms")],
-    ["GET", /^\/(rooms|rooms\/\d+|devices\/\d+|recipes|recipes\/new|recipes\/\d+|pantry)$/,
+    ["GET", /^\/(rooms|rooms\/\d+|devices\/\d+|recipes|recipes\/new|recipes\/\d+|pantry|account)$/,
         (req, res) => serveFile(req, res, "index.html")],
     // old address of the ambilight page
     ["GET", /^\/ambilight$/, async (req, res) => {
@@ -341,7 +347,28 @@ const ROUTES = [
     // nur auf ausdrücklichen Klick; die Vorschau ist /shopping-list
     ["POST", /^\/api\/recipes\/(\d+)\/bring$/, async (req, res, id) => {
         const { servings, list } = await readJson(req);
-        sendJson(res, 200, await bring.sendRecipes([Number(id)], servings, list));
+        sendJson(res, 200, await bring.sendRecipes(req.user.id, [Number(id)], servings, list));
+    }],
+
+    // das eigene Bring!-Konto, Seite „Konto“. Anmelden, Trennen und die Standardliste ändern nur
+    // mit dem Cookie-Login: ein Token (Claude, OAuth) soll das Konto nicht austauschen können,
+    // sonst ginge die Einkaufsliste danach an ein fremdes Konto
+    ["GET", /^\/api\/bring$/, async (req, res) => sendJson(res, 200, await bring.status(req.user.id))],
+    ["GET", /^\/api\/bring\/lists$/, async (req, res) => sendJson(res, 200, { lists: await bring.lists(req.user.id) })],
+    ["POST", /^\/api\/bring\/login$/, async (req, res) => {
+        requireBrowserLogin(req);
+        const { email, password } = await readJson(req);
+        sendJson(res, 200, await bring.connect(req.user.id, email, password));
+    }],
+    ["POST", /^\/api\/bring\/logout$/, async (req, res) => {
+        requireBrowserLogin(req);
+        await readJson(req);
+        sendJson(res, 200, await bring.disconnect(req.user.id));
+    }],
+    ["POST", /^\/api\/bring\/list$/, async (req, res) => {
+        requireBrowserLogin(req);
+        const { list_uuid: listUuid } = await readJson(req);
+        sendJson(res, 200, await bring.setDefaultList(req.user.id, listUuid ?? null));
     }],
     // das Bild kommt als rohe Bytes, der Typ wird an den ersten Bytes geprüft (recipes.js)
     ["POST", /^\/api\/recipes\/(\d+)\/image$/, async (req, res, id) => {

@@ -385,6 +385,19 @@ CREATE INDEX IF NOT EXISTS api_tokens_user_id_idx ON api_tokens (user_id);
 -- so "user.js token delete <benutzer> <name>" always means exactly one token
 CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_user_name_idx ON api_tokens (user_id, lower(name));
 
+-- The Bring! account of a user (Node/bring.js): everybody logs in to their own account on the
+-- page "Konto". The password is only used for the login itself and never stored; what is kept
+-- is the refresh token of Bring!, AES-256-GCM encrypted with a key that is not in the database
+-- (credentials = "iv.tag.data", base64url, see bring.js). A database dump alone is useless.
+-- list_uuid: the shopping list that is used when a call does not name one
+CREATE TABLE IF NOT EXISTS bring_accounts (
+    user_id     BIGINT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    email       TEXT NOT NULL,
+    credentials TEXT NOT NULL,
+    list_uuid   TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- OAuth for claude.ai and the phone app (Node/oauth.js): the Pi is its own small authorization
 -- server. The access tokens of OAuth are ordinary rows in api_tokens (named "oauth:<client_id>"),
 -- so mcp.js and auth.js do not know the difference. Only what OAuth adds lives here.

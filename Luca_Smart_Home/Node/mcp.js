@@ -70,7 +70,7 @@ const object = (properties, required = []) => ({ type: "object", properties, req
 const NO_ARGS = { type: "object", additionalProperties: false };
 
 const BRING_LIST = text("Name oder list_uuid der Bring!-Liste (bring_lists zeigt sie). Weglassen = "
-    + "die Standardliste des Servers, oder die einzige Liste.");
+    + "die Standardliste, die der Benutzer auf der Seite „Konto“ gewählt hat, oder die einzige Liste.");
 
 const SERVINGS = integer("Für wie viele Portionen gerechnet werden soll. Weglassen = die "
     + "Portionszahl, die im Rezept steht.", { minimum: 1, maximum: 100 });
@@ -229,9 +229,11 @@ const TOOLS = [
     {
         name: "bring_lists",
         title: "Bring!-Listen",
-        description: "Die Einkaufslisten im Bring!-Konto, mit Name und list_uuid.",
+        description: "Die Einkaufslisten im Bring!-Konto des Benutzers, mit Name und list_uuid. "
+            + "Ist noch kein Konto verbunden, sagt der Fehler, dass sich der Benutzer auf der "
+            + "Seite „Konto“ bei Bring! anmelden muss.",
         inputSchema: NO_ARGS,
-        run: async () => ({ lists: await bring.lists() }),
+        run: async (args, user) => ({ lists: await bring.lists(user.id) }),
     },
     {
         name: "bring_list_items",
@@ -239,7 +241,7 @@ const TOOLS = [
         description: "Was schon auf einer Bring!-Liste steht. Vor bring_add_items aufrufen, wenn "
             + "Doppeleinträge vermieden werden sollen.",
         inputSchema: object({ list: BRING_LIST }),
-        run: ({ list }) => bring.listItems(list),
+        run: ({ list }, user) => bring.listItems(user.id, list),
     },
     {
         name: "bring_add_items",
@@ -259,7 +261,7 @@ const TOOLS = [
             }, ["name"]), "Die items aus plan_shopping_list."),
             list: BRING_LIST,
         }, ["items"]),
-        run: ({ items, list: target }) => bring.addItems(items, target),
+        run: ({ items, list: target }, user) => bring.addItems(user.id, items, target),
     },
 ];
 

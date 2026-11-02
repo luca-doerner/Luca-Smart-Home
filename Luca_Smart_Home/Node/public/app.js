@@ -4,15 +4,18 @@ import { api, breadcrumb, cardGrid, el, errorBox, icon, plural, showPage } from 
 import { renderFeature, settingsForm } from "./feature-panel.js";
 import { renderRecipeEditPage, renderRecipePage, renderRecipesPage } from "./recipes.js";
 import { renderPantryPage } from "./pantry.js";
+import { renderAccountPage } from "./account.js";
 
 const EXPANDED_KEY = "smarthome.expanded";
 const DEVICE_POLL_MS = 5000;   // how often the dots of the feature tabs are updated
 const sidebar = document.getElementById("sidebar");
 
 /*************** Route ************************************************************************/
-// key of a navigation entry: "rooms", "room:<id>", "device:<id>", "recipes" or "pantry"
+// key of a navigation entry: "rooms", "room:<id>", "device:<id>", "recipes", "pantry" or "account"
 function currentRoute() {
-    const [, page, id] = location.pathname.match(/^\/(rooms|devices|recipes|pantry)(?:\/(new|\d+))?$/) || [];
+    const [, page, id] = location.pathname.match(/^\/(rooms|devices|recipes|pantry|account)(?:\/(new|\d+))?$/) || [];
+    if (page === "account")
+        return { page: "account", key: "account" };
     if (page === "devices" && id)
         return { page: "device", id: Number(id), key: `device:${id}` };
     if (page === "rooms" && id)
@@ -69,6 +72,7 @@ function navigationEntries(tree) {
         },
         { key: "recipes", label: "Rezepte", href: "/recipes", icon: "book", children: [] },
         { key: "pantry", label: "Vorrat", href: "/pantry", icon: "pantry", children: [] },
+        { key: "account", label: "Konto", href: "/account", icon: "user", children: [] },
     ];
 }
 
@@ -416,10 +420,14 @@ async function init() {
             await renderRecipeEditPage(route.id);
         else if (route.page === "pantry")
             await renderPantryPage();
+        else if (route.page === "account")
+            await renderAccountPage();
     } catch (err) {
         const errors = errorBox();
         errors.show("page", `Seite konnte nicht geladen werden: ${err.message}`);
-        const home = route.key === "rooms" ? { label: "Zimmer", href: "/rooms" } : { label: "Rezepte", href: "/recipes" };
+        const home = route.key === "rooms" ? { label: "Zimmer", href: "/rooms" }
+            : route.key === "account" ? { label: "Konto", href: "/account" }
+            : { label: "Rezepte", href: "/recipes" };
         showPage(breadcrumb([home, { label: "Fehler" }]), errors.node);
     }
 }

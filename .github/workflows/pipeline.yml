@@ -40,8 +40,5 @@ jobs:
           DB_NAME: ${{ vars.DB_NAME }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           PUBLIC_URL: ${{ vars.PUBLIC_URL }}
-          BRING_EMAIL: ${{ secrets.BRING_EMAIL }}
-          BRING_PASSWORD: ${{ secrets.BRING_PASSWORD }}
-          BRING_LIST_UUID: ${{ secrets.BRING_LIST_UUID }}
           ANSIBLE_HOST_KEY_CHECKING: "False"
         run: ansible-playbook -i deploy/inventory.ini deploy/ansible.yml
