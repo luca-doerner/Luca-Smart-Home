@@ -342,6 +342,11 @@ CREATE TABLE IF NOT EXISTS recipe_ingredients (
     PRIMARY KEY (recipe_id, position)
 );
 
+-- alternative_group: ingredients of one recipe with the same text here are alternatives ("either
+-- chili flakes or chipotle powder"): the shopping list does not put them on the list but asks
+-- which one is wanted (recipes.js, planShoppingList). NULL = an ordinary ingredient.
+ALTER TABLE recipe_ingredients ADD COLUMN IF NOT EXISTS alternative_group TEXT;
+
 -- for ON DELETE RESTRICT and for "which recipes use this ingredient"
 CREATE INDEX IF NOT EXISTS recipe_ingredients_ingredient_idx ON recipe_ingredients (ingredient_id);
 

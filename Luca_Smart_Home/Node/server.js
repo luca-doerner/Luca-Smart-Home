@@ -346,8 +346,8 @@ const ROUTES = [
     // Knopf „An Bring! senden“: { servings?, list? }. Schreibt in eine geteilte Liste, deshalb
     // nur auf ausdrücklichen Klick; die Vorschau ist /shopping-list
     ["POST", /^\/api\/recipes\/(\d+)\/bring$/, async (req, res, id) => {
-        const { servings, list } = await readJson(req);
-        sendJson(res, 200, await bring.sendRecipes(req.user.id, [Number(id)], servings, list));
+        const { servings, list, choices } = await readJson(req);
+        sendJson(res, 200, await bring.sendRecipes(req.user.id, [Number(id)], servings, list, choices));
     }],
 
     // das eigene Bring!-Konto, Seite „Konto“. Anmelden, Trennen und die Standardliste ändern nur

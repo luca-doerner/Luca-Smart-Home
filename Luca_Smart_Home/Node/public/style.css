@@ -1451,3 +1451,19 @@ a.badge:hover {
         grid-template-columns: 5.5em minmax(0, 1fr);
     }
 }
+
+/* "Entweder oder" in der Einkaufsliste: eine Wahl je Alternative */
+fieldset.choice {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin: 12px 0;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+fieldset.choice legend {
+    padding: 0 6px;
+    font-weight: 600;
+}

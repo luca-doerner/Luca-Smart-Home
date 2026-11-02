@@ -263,6 +263,16 @@ Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
   `items` ist genau die Form, die Bring! `saveItem(listUuid, itemName, specification)` braucht:
   `{ name, spec }`. `from_pantry` und `note` sind **Pflicht in der Antwort**, auch wenn leer:
   der Agent soll die Vorratszutaten nennen, damit nichts vergessen wird.
+- **Alternativen („Chiliflocken oder Chipotle-Pulver“)** sind eine Wahl, keine zwei Zutaten:
+  `recipe_ingredients.alternative_group` — gleicher Text im selben Rezept heißt „eine davon
+  genügt“. Sie stehen **nicht** in `items`, sondern in `choices` (`{ question, options: [{ name,
+  spec }] }`, in der Antwort Pflicht wie `from_pantry`); die `note` sagt dem Agenten, dass er
+  nachfragen und nur die gewählte eintragen soll. Auch ein einzelner Name „A oder B“ wird
+  automatisch so zerlegt (so schreiben es Rezepte und KIs gern). Reicht der Vorrat für eine
+  Option, entfällt die Wahl (steht in `from_pantry`). `POST /api/recipes/:id/bring` nimmt
+  `choices: [Name, …]` und verlangt genau eine Option je Alternative, sonst `400` — die Seite
+  schaltet den Knopf erst nach der Wahl frei. Das MCP-Werkzeug `bring_add_items` kann das nicht
+  erzwingen (es kennt die Alternativen nicht), deshalb steht es in den Beschreibungen.
 - Mehrere Rezepte werden zusammengefasst: gleiche Zutat und gleiche Einheit werden addiert, eine
   Zutat ohne Menge („Butter zum Braten“) wird in den vorhandenen Eintrag eingehängt.
 

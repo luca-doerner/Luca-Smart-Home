@@ -158,7 +158,10 @@ function rowList({ items, blank, render, keep, addLabel, emptyText, onChange = (
 function ingredientRows(ingredients, datalistId, onChange) {
     return rowList({
         items: ingredients,
-        blank: () => ({ name: "", amount: null, unit: null, note: null, group_label: null, optional: false }),
+        blank: () => ({
+            name: "", amount: null, unit: null, note: null, group_label: null, optional: false,
+            alternative_group: null,
+        }),
         addLabel: "Zutat",
         emptyText: "Noch keine Zutat.",
         onChange,
@@ -184,12 +187,17 @@ function ingredientRows(ingredients, datalistId, onChange) {
                 type: "text", value: row.group_label ?? "", placeholder: "Gruppe, z. B. Für die Soße",
                 maxlength: 200, "aria-label": `Zutat ${index + 1}: Gruppe`,
             });
+            const alternative = el("input", {
+                type: "text", value: row.alternative_group ?? "", maxlength: 200,
+                placeholder: "Entweder/oder, z. B. Schärfe", "aria-label": `Zutat ${index + 1}: Alternative`,
+                title: "Zutaten mit demselben Text hier sind Alternativen: auf die Einkaufsliste kommt nur die, die du auswählst",
+            });
             const optional = el("input", { type: "checkbox", checked: row.optional });
-            for (const input of [name, amount, unit, note, group, optional])
+            for (const input of [name, amount, unit, note, group, alternative, optional])
                 input.addEventListener("input", changed);
 
             return {
-                node: [name, amount, unit, note, group,
+                node: [name, amount, unit, note, group, alternative,
                     el("label", { class: "inline-check" }, optional, "optional")],
                 read: () => ({
                     name: name.value.trim(),
@@ -197,6 +205,7 @@ function ingredientRows(ingredients, datalistId, onChange) {
                     unit: unit.value.trim() || null,
                     note: note.value.trim() || null,
                     group_label: group.value.trim() || null,
+                    alternative_group: alternative.value.trim() || null,
                     optional: optional.checked,
                 }),
             };
@@ -408,7 +417,10 @@ function ingredientTable(ingredients) {
             el("span", { class: "ingredient-amount-text" }, amountWithUnit(entry.amount, entry.unit)),
             el("span", {}, entry.name,
                 entry.note ? el("span", { class: "muted" }, `, ${entry.note}`) : null,
-                entry.optional ? el("span", { class: "badge" }, "optional") : null)))),
+                entry.optional ? el("span", { class: "badge" }, "optional") : null,
+                entry.alternative_group
+                    ? el("span", { class: "badge", title: "Alternative: du brauchst nur eine davon" }, `oder · ${entry.alternative_group}`)
+                    : null)))),
     ]);
 }
 
@@ -462,14 +474,24 @@ function servingsCalculator(recipe, errors) {
 
 // „An Bring! senden“ erscheint erst unter der Vorschau: Bring!-Listen sind geteilt, geschrieben
 // wird deshalb nur nach dem ausdrücklichen Klick, nachdem man gesehen hat, was hineinkommt
-function bringButton(recipe, servings, errors) {
+// chosen(): die Namen der gewählten Alternativen, oder null, solange noch nicht überall gewählt ist
+function bringButton(recipe, servings, errors, chosen) {
     const status = el("p", { class: "muted hint" });
     const button = el("button", { type: "button", class: "button" }, icon("cart"), "An Bring! senden");
+    const node = el("div", { class: "bring-send" }, button, status);
+    node.update = () => {
+        button.disabled = chosen() === null;
+        status.textContent = button.disabled ? "Bitte erst bei „entweder/oder“ eine Zutat wählen." : "";
+    };
+    node.update();
     button.addEventListener("click", async () => {
+        const choices = chosen();
+        if (choices === null)
+            return;
         button.disabled = true;
         status.textContent = "";
         try {
-            const { bring, note } = await api(`/api/recipes/${recipe.id}/bring`, { servings });
+            const { bring, note } = await api(`/api/recipes/${recipe.id}/bring`, { servings, choices });
             status.textContent = bring ? bring.note : note;
             errors.show("bring", "");
         } catch (err) {
@@ -478,7 +500,25 @@ function bringButton(recipe, servings, errors) {
             button.disabled = false;
         }
     });
-    return el("div", { class: "bring-send" }, button, status);
+    return node;
+}
+
+// Alternativen („A oder B“): eine Wahl je Alternative. Ohne Wahl steht nichts auf der Liste —
+// nie beides und nie eine, die niemand ausgesucht hat.
+function choicesBlock(choices, onChange) {
+    const selected = choices.map(() => null);
+    const nodes = choices.map((choice, index) => el("fieldset", { class: "choice" },
+        el("legend", {}, `Entweder oder: ${choice.question}`),
+        choice.options.map((option) => el("label", { class: "inline-check" },
+            el("input", {
+                type: "radio", name: `choice-${index}`,
+                onchange() {
+                    selected[index] = option.name;
+                    onChange();
+                },
+            }),
+            option.spec ? `${option.name} (${option.spec})` : option.name))));
+    return { nodes, chosen: () => (selected.every(Boolean) ? [...selected] : null) };
 }
 
 // Einkaufsliste auf Knopfdruck: zeigt ausdrücklich, was aus dem Vorrat kommt — das ist dieselbe
@@ -494,13 +534,16 @@ function shoppingListBox(recipe, errors) {
             const list = await api(`/api/recipes/${recipe.id}/shopping-list?servings=${servings}`);
             // replaceChildren macht verschachtelte Listen nicht flach und schreibt null als
             // Text hin — deshalb hier eine flache Liste bauen, nicht wie bei el() verschachteln
+            const block = choicesBlock(list.choices, () => bring.update());
+            const bring = bringButton(recipe, list.servings, errors, block.chosen);
             result.replaceChildren(
                 el("h4", {}, `Einkaufen für ${plural(list.servings, "Portion", "Portionen")}`),
-                list.items.length === 0
+                list.items.length === 0 && list.choices.length === 0
                     ? el("p", { class: "empty" }, "Alles schon da.")
                     : el("ul", { class: "ingredient-list" }, list.items.map((item) => el("li", {},
                         el("span", { class: "ingredient-amount-text" }, item.spec),
                         el("span", {}, item.name)))),
+                ...block.nodes,
                 ...(list.from_pantry.length === 0 ? [] : [
                     el("h4", {}, "Aus dem Vorrat"),
                     el("ul", { class: "ingredient-list" }, list.from_pantry.map((item) => el("li", {},
@@ -508,7 +551,7 @@ function shoppingListBox(recipe, errors) {
                         el("span", {}, item.name, el("span", { class: "muted" }, ` — ${item.reason}`))))),
                 ]),
                 el("p", { class: "muted hint" }, list.note),
-                ...(list.items.length === 0 ? [] : [bringButton(recipe, list.servings, errors)]));
+                ...(list.items.length + list.choices.length === 0 ? [] : [bring]));
             errors.show("shopping", "");
         } catch (err) {
             errors.show("shopping", `Einkaufsliste fehlgeschlagen: ${err.message}`);

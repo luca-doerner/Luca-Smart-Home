@@ -135,6 +135,7 @@ function normalizeIngredient(entry, index) {
         note: optionalText(entry.note, `${where}: Hinweis`, MAX_NAME),
         group_label: optionalText(entry.group_label, `${where}: Gruppe`, MAX_NAME),
         optional: optionalBoolean(entry.optional, `${where}: optional`),
+        alternative_group: optionalText(entry.alternative_group, `${where}: Alternative`, MAX_NAME),
     };
 }
 
@@ -278,7 +279,7 @@ async function getRecipe(id) {
         throw new HttpError(404, "Rezept nicht gefunden");
 
     const { rows: ingredients } = await db.query(`
-        SELECT i.name, r.amount, r.unit, r.note, r.group_label, r.optional
+        SELECT i.name, r.amount, r.unit, r.note, r.group_label, r.optional, r.alternative_group
         FROM recipe_ingredients r
         JOIN ingredients i ON i.id = r.ingredient_id
         WHERE r.recipe_id = $1
@@ -394,11 +395,14 @@ async function saveRecipe(id, input, userId = null) {
         if (recipe.ingredients.length > 0)
             await client.query(`
                 INSERT INTO recipe_ingredients
-                    (recipe_id, position, ingredient_id, amount, unit, note, group_label, optional)
-                SELECT $1, position, ingredient_id, amount, unit, note, group_label, optional
+                    (recipe_id, position, ingredient_id, amount, unit, note, group_label, optional,
+                     alternative_group)
+                SELECT $1, position, ingredient_id, amount, unit, note, group_label, optional,
+                       alternative_group
                 FROM unnest($2::int[], $3::bigint[], $4::double precision[], $5::text[], $6::text[],
-                            $7::text[], $8::boolean[])
-                     AS t (position, ingredient_id, amount, unit, note, group_label, optional)`, [
+                            $7::text[], $8::boolean[], $9::text[])
+                     AS t (position, ingredient_id, amount, unit, note, group_label, optional,
+                           alternative_group)`, [
                 recipeId,
                 recipe.ingredients.map((_, index) => index + 1),
                 recipe.ingredients.map((entry) => ids.get(entry.name.toLowerCase())),
@@ -407,6 +411,7 @@ async function saveRecipe(id, input, userId = null) {
                 recipe.ingredients.map((entry) => entry.note),
                 recipe.ingredients.map((entry) => entry.group_label),
                 recipe.ingredients.map((entry) => entry.optional),
+                recipe.ingredients.map((entry) => entry.alternative_group),
             ]);
 
         if (recipe.steps.length > 0)
@@ -512,12 +517,30 @@ async function planShoppingList(recipeIds, servings) {
     // vorhandenen Eintrag derselben Zutat eingehängt, statt eine zweite Zeile zu erzeugen.
     const unitKey = (unit) => (unit ?? "").toLowerCase();
     const needed = new Map();   // name (klein) -> [{ name, unit, amount, note }]
+    const groups = new Map();   // "<rezept>:<gruppe>" -> [Zutaten, von denen eine genügt]
     const used = [];            // welches Rezept mit wie vielen Portionen gerechnet wurde
     for (const recipeId of recipeIds) {
         const recipe = await getRecipeIngredients(recipeId, servings);
         const { ingredients, servings: target } = recipe;
         used.push({ id: recipe.id, name: recipe.name, servings: target });
         for (const entry of ingredients) {
+            // Alternativen („entweder Chiliflocken oder Chipotle-Pulver“) werden nie
+            // zusammengefasst und nie einfach auf die Liste gesetzt: sie sind eine Wahl
+            if (entry.alternative_group) {
+                const groupId = `${recipe.id}:${entry.alternative_group.toLowerCase()}`;
+                if (!groups.has(groupId))
+                    groups.set(groupId, []);
+                groups.get(groupId).push(entry);
+                continue;
+            }
+            // „A oder B“ in einem einzigen Namen heißt dasselbe, auch wenn niemand die
+            // Alternative eingetragen hat (so schreiben es Rezepte und KIs gern)
+            const parts = entry.name.split(/\s+oder\s+/i).map((part) => part.trim()).filter(Boolean);
+            if (parts.length > 1) {
+                groups.set(`${recipe.id}:name:${entry.name.toLowerCase()}`,
+                    parts.map((part) => ({ ...entry, name: part })));
+                continue;
+            }
             const key = entry.name.toLowerCase();
             if (!needed.has(key))
                 needed.set(key, []);
@@ -538,26 +561,23 @@ async function planShoppingList(recipeIds, servings) {
         }
     }
 
-    const names = [...needed.keys()];
+    const names = [...new Set([...needed.keys(), ...[...groups.values()].flat().map((entry) => entry.name.toLowerCase())])];
     const { rows: pantry } = await db.query(`
         SELECT i.name, p.always_available, p.amount, p.unit
         FROM pantry_items p JOIN ingredients i ON i.id = p.ingredient_id
         WHERE lower(i.name) = ANY($1::text[])`, [names]);
     const inPantry = new Map(pantry.map((row) => [row.name.toLowerCase(), row]));
 
-    const items = [];
-    const fromPantry = [];
-    for (const entry of [...needed.values()].flat()) {
+    // Was eine Zutat für die Liste heißt: { item, pantry }. item = muss gekauft werden (null: nichts),
+    // pantry = steht im Vorrat und muss genannt werden (null: nicht im Vorrat). Beides ist
+    // möglich, wenn vom Vorrat nur ein Teil da ist.
+    function decide(entry) {
         const stock = inPantry.get(entry.name.toLowerCase());
         const neededSpec = spec(entry.amount, entry.unit, entry.note);
-        if (!stock) {
-            items.push({ name: entry.name, spec: neededSpec });
-            continue;
-        }
-        if (stock.always_available) {
-            fromPantry.push({ name: entry.name, needed: neededSpec, reason: "immer vorrätig" });
-            continue;
-        }
+        if (!stock)
+            return { item: { name: entry.name, spec: neededSpec }, pantry: null };
+        if (stock.always_available)
+            return { item: null, pantry: { name: entry.name, needed: neededSpec, reason: "immer vorrätig" } };
 
         // ohne Menge im Vorrat bleibt es bei „vorrätig“, mit Menge wird sie genannt
         const stockSpec = spec(stock.amount, stock.unit, null);
@@ -567,17 +587,40 @@ async function planShoppingList(recipeIds, servings) {
             : 0;
         if (missing > 0) {
             // zu wenig im Vorrat: nur der Rest muss gekauft werden, der Vorrat wird genannt
-            items.push({ name: entry.name, spec: spec(missing, entry.unit, entry.note) });
-            fromPantry.push({
-                name: entry.name, needed: neededSpec,
-                reason: `${stockSpec} vorrätig, ${spec(missing, entry.unit, null)} fehlen`,
-            });
-        } else {
-            fromPantry.push({
-                name: entry.name, needed: neededSpec,
-                reason: stockSpec ? `${stockSpec} vorrätig` : "vorrätig",
-            });
+            return {
+                item: { name: entry.name, spec: spec(missing, entry.unit, entry.note) },
+                pantry: {
+                    name: entry.name, needed: neededSpec,
+                    reason: `${stockSpec} vorrätig, ${spec(missing, entry.unit, null)} fehlen`,
+                },
+            };
         }
+        return {
+            item: null,
+            pantry: { name: entry.name, needed: neededSpec, reason: stockSpec ? `${stockSpec} vorrätig` : "vorrätig" },
+        };
+    }
+
+    const items = [];
+    const fromPantry = [];
+    const choices = [];
+    for (const entry of [...needed.values()].flat()) {
+        const { item, pantry: stocked } = decide(entry);
+        if (item)
+            items.push(item);
+        if (stocked)
+            fromPantry.push(stocked);
+    }
+    for (const options of groups.values()) {
+        const decided = options.map((entry) => ({ entry, ...decide(entry) }));
+        // reicht der Vorrat für eine der Alternativen, muss keine gekauft werden
+        const covered = decided.find((one) => one.item === null);
+        if (covered) {
+            const others = decided.filter((one) => one !== covered).map((one) => one.entry.name);
+            fromPantry.push({ ...covered.pantry, reason: `${covered.pantry.reason} — reicht statt ${others.join(" oder ")}` });
+            continue;
+        }
+        choices.push({ question: options.map((entry) => entry.name).join(" oder "), options: decided.map((one) => one.item) });
     }
 
     // bei einem Rezept (und bei mehreren mit derselben Portionszahl) steht hier die Zahl, mit
@@ -587,12 +630,20 @@ async function planShoppingList(recipeIds, servings) {
         servings: allServings.length === 1 ? allServings[0] : (parseServings(servings) ?? null),
         recipes: used,
         items,
+        choices,
         from_pantry: fromPantry,
-        note: fromPantry.length === 0
-            ? "Nichts kommt aus dem Vorrat, die Liste ist vollständig."
-            : `${fromPantry.length} Zutat(en) stammen aus dem Vorrat und stehen nicht `
-              + "(oder nur mit der fehlenden Menge) auf der Liste. "
-              + "Bitte nenne sie in der Antwort, damit nichts vergessen wird.",
+        note: [
+            fromPantry.length === 0
+                ? "Nichts kommt aus dem Vorrat."
+                : `${fromPantry.length} Zutat(en) stammen aus dem Vorrat und stehen nicht `
+                  + "(oder nur mit der fehlenden Menge) auf der Liste. "
+                  + "Bitte nenne sie in der Antwort, damit nichts vergessen wird.",
+            choices.length === 0
+                ? "Die Liste ist vollständig."
+                : `${choices.length} Zutat(en) sind Alternativen (choices) und stehen NICHT in items: `
+                  + `${choices.map((choice) => `„${choice.question}“`).join(", ")}. `
+                  + "Frage den Benutzer, welche Option er haben will, und trage nur die gewählte ein.",
+        ].join(" "),
     };
 }
 

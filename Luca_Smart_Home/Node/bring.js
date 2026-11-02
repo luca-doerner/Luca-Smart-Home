@@ -369,11 +369,30 @@ async function addItems(userId, items, list) {
 // Rezepte -> Einkaufsliste (mit Vorrat abgezogen) -> Bring!. Das ist der Weg des Knopfes auf der
 // Rezeptseite. Plan und Eintrag kommen zusammen zurück, damit auch hier from_pantry und note
 // beim Benutzer ankommen.
-async function sendRecipes(userId, recipeIds, servings, list) {
+//
+// Alternativen („Chiliflocken oder Chipotle-Pulver“, plan.choices) trägt nur ein, was der
+// Benutzer ausdrücklich gewählt hat: chosen ist die Liste der gewählten Namen, genau einer je
+// Alternative. Ohne Wahl wird nichts geschrieben — lieber nachfragen als beides eintragen.
+async function sendRecipes(userId, recipeIds, servings, list, chosen = []) {
     const plan = await recipes.planShoppingList(recipeIds, servings);
-    if (plan.items.length === 0)
+    if (!Array.isArray(chosen) || chosen.some((name) => typeof name !== "string"))
+        throw new HttpError(400, "choices muss eine Liste von Namen sein");
+    const picked = new Set(chosen.map((name) => name.trim().toLowerCase()));
+
+    const items = [...plan.items];
+    for (const choice of plan.choices) {
+        const selected = choice.options.filter((option) => picked.has(option.name.toLowerCase()));
+        if (selected.length !== 1)
+            throw new HttpError(400, `Bitte genau eine wählen: ${choice.question}`);
+        items.push(selected[0]);
+        selected.forEach((option) => picked.delete(option.name.toLowerCase()));
+    }
+    if (picked.size > 0)
+        throw new HttpError(400, "Die Auswahl passt nicht zu den Alternativen des Rezepts");
+
+    if (items.length === 0)
         return { plan, bring: null, note: "Es muss nichts gekauft werden, alles ist im Vorrat." };
-    return { plan, bring: await addItems(userId, plan.items, list) };
+    return { plan, bring: await addItems(userId, items, list) };
 }
 
 module.exports = { status, connect, disconnect, lists, setDefaultList, listItems, addItems, sendRecipes };

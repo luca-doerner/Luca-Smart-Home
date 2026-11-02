@@ -48,7 +48,8 @@ const LEGACY_FALLBACK = "2025-06-18";
 const INSTRUCTIONS = "Rezepte, Zutaten und Vorrat aus Lucas Smart Home. Typischer Ablauf: "
     + "search_recipes, dann get_recipe, dann plan_shopping_list, nach dem Ja des Benutzers "
     + "bring_add_items. Die Einträge in from_pantry einer Einkaufsliste gehören nicht auf die "
-    + "Liste, müssen dem Benutzer aber genannt werden.";
+    + "Liste, müssen dem Benutzer aber genannt werden. Steht in choices eine Alternative "
+    + "(„A oder B“), frag den Benutzer, welche er will, und trag nur diese ein.";
 
 /* JSON-RPC- und MCP-Fehlercodes (MCP legt -32020 und -32022 fest) */
 const INVALID_REQUEST = -32600;
@@ -82,6 +83,10 @@ const INGREDIENT_SCHEMA = object({
     note: text("Zusatz zur Zutat, z. B. „fein gewürfelt“."),
     group_label: text("Zwischentitel in der Zutatenliste, z. B. „Für die Soße“."),
     optional: flag("true, wenn die Zutat weggelassen werden kann."),
+    alternative_group: text("Für „entweder A oder B“: gib allen Alternativen denselben Text, z. B. "
+        + "„Schärfe“ bei Chiliflocken und Chipotle-Pulver. Jede Alternative ist eine eigene Zutat mit "
+        + "eigenem Namen. Nicht „A oder B“ in einen Namen schreiben und nicht beide ohne Gruppe anlegen: "
+        + "sonst steht am Ende beides auf der Einkaufsliste."),
 }, ["name"]);
 
 const STEP_SCHEMA = object({
@@ -150,7 +155,11 @@ const TOOLS = [
             + "der Antwort an den Benutzer aber genannt werden, sonst fehlt am Ende etwas. Der "
             + "Satz in note sagt genau das.\n\n"
             + "Mehrere Rezepte werden zusammengefasst: gleiche Zutat mit gleicher Einheit wird "
-            + "addiert.",
+            + "addiert.\n\n"
+            + "choices sind Alternativen („Chiliflocken ODER Chipotle-Pulver“). Sie stehen "
+            + "absichtlich NICHT in items. Frage den Benutzer für jede Alternative, welche er "
+            + "haben will (nenne die Optionen), und trage danach nur die gewählte ein. Nie beide, "
+            + "nie ungefragt eine.",
         inputSchema: object({
             recipe_ids: list(integer("Die id eines Rezepts."), "Ein bis zwanzig Rezepte."),
             servings: SERVINGS,
@@ -248,7 +257,8 @@ const TOOLS = [
         title: "In Bring! eintragen",
         description: "Trägt Einträge in eine Bring!-Liste ein. items ist genau die Ausgabe von "
             + "plan_shopping_list (name, spec) — nichts umrechnen, nichts aus from_pantry "
-            + "hinzufügen.\n\n"
+            + "hinzufügen. Aus choices nur das, was der Benutzer ausdrücklich gewählt hat: nie "
+            + "alle Optionen einer Alternative, und keine, die er nicht gewählt hat.\n\n"
             + "Das SCHREIBT in eine geteilte Liste, andere sehen es sofort. Deshalb zuerst die "
             + "Vorschau (plan_shopping_list) dem Benutzer zeigen und erst nach seinem Ja "
             + "eintragen.\n\n"
