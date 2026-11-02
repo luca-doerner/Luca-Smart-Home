@@ -460,6 +460,27 @@ function servingsCalculator(recipe, errors) {
         table);
 }
 
+// „An Bring! senden“ erscheint erst unter der Vorschau: Bring!-Listen sind geteilt, geschrieben
+// wird deshalb nur nach dem ausdrücklichen Klick, nachdem man gesehen hat, was hineinkommt
+function bringButton(recipe, servings, errors) {
+    const status = el("p", { class: "muted hint" });
+    const button = el("button", { type: "button", class: "button" }, icon("cart"), "An Bring! senden");
+    button.addEventListener("click", async () => {
+        button.disabled = true;
+        status.textContent = "";
+        try {
+            const { bring, note } = await api(`/api/recipes/${recipe.id}/bring`, { servings });
+            status.textContent = bring ? bring.note : note;
+            errors.show("bring", "");
+        } catch (err) {
+            errors.show("bring", `An Bring! senden fehlgeschlagen: ${err.message}`);
+        } finally {
+            button.disabled = false;
+        }
+    });
+    return el("div", { class: "bring-send" }, button, status);
+}
+
 // Einkaufsliste auf Knopfdruck: zeigt ausdrücklich, was aus dem Vorrat kommt — das ist dieselbe
 // Antwort, die auch das MCP-Werkzeug plan_shopping_list liefert
 function shoppingListBox(recipe, errors) {
@@ -486,7 +507,8 @@ function shoppingListBox(recipe, errors) {
                         el("span", { class: "ingredient-amount-text" }, item.needed),
                         el("span", {}, item.name, el("span", { class: "muted" }, ` — ${item.reason}`))))),
                 ]),
-                el("p", { class: "muted hint" }, list.note));
+                el("p", { class: "muted hint" }, list.note),
+                ...(list.items.length === 0 ? [] : [bringButton(recipe, list.servings, errors)]));
             errors.show("shopping", "");
         } catch (err) {
             errors.show("shopping", `Einkaufsliste fehlgeschlagen: ${err.message}`);

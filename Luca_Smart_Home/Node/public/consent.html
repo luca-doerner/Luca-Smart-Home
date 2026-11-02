@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Zugriff erlauben · Smart Home</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body class="login-page">
+    <main class="login-main">
+        <section id="consent" class="card login-card">
+            <h1>Zugriff erlauben?</h1>
+            <p id="consent-text" class="muted">Einen Moment …</p>
+            <p id="consent-error" class="error" role="alert" hidden></p>
+            <div id="consent-actions" class="consent-actions" hidden>
+                <button id="consent-deny" class="button" type="button">Ablehnen</button>
+                <button id="consent-allow" class="button primary" type="button">Erlauben</button>
+            </div>
+        </section>
+    </main>
+    <script type="module" src="/consent.js"></script>
+</body>
+</html>

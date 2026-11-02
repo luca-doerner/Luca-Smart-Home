@@ -35,13 +35,15 @@ Browser ──HTTP/JSON──> Node (server.js)
             <──SSE /api/log──  stdout/stderr der C-Programme
 
 KI ──HTTP/JSON-RPC + Bearer-Token──> /api/mcp (mcp.js) ──> recipes.js / pantry.js
+claude.ai / Handy ──OAuth (oauth.js)──> Access-Token ──> /api/mcp           └──> bring.js ──> Bring!
 ```
 
 ## Datenbank (`Database/schema.sql`)
 
 `rooms` → `devices` (verschachtelbar) → `features` → `setting_definitions` / `settings`,
 dazu `device_setting_definitions` / `device_settings`, `feature_kinds`, `users`, `sessions`,
-`api_tokens` und die rekursive View `devices_with_room`.
+`api_tokens`, die OAuth-Tabellen `oauth_clients` / `oauth_codes` / `oauth_refresh_tokens` und die
+rekursive View `devices_with_room`.
 Der Rezeptteil steht daneben: `ingredients` → `recipes` → `recipe_ingredients` / `recipe_steps`,
 dazu `pantry_items` und die View `recipes_search`.
 
@@ -195,7 +197,9 @@ Kein Framework, nur `http`/`dgram`/`child_process` + `pg`.
 | `user.js` | `sudo node user.js add/password/delete/list` + `token add/list/delete` (keine Registrierungsseite) |
 | `recipes.js` | Rezepte, Zutaten, Tags, Skalieren, Einkaufsliste, Bilder |
 | `pantry.js` | der Vorrat (`pantry_items`) |
-| `mcp.js` | MCP-Server: JSON-RPC über `POST /api/mcp`, ruft `recipes.js`/`pantry.js` direkt auf |
+| `mcp.js` | MCP-Server: JSON-RPC über `POST /api/mcp`, ruft `recipes.js`/`pantry.js`/`bring.js` direkt auf |
+| `bring.js` | Bring!-Konnektor (inoffizielle API per `fetch`, kein Zusatzpaket): Anmelden, Listen, Einträge hinzufügen |
+| `oauth.js` | OAuth 2.1 für claude.ai/Handy: Metadaten, Registrierung, Freigabe, Token (PKCE S256) |
 | `db.js` | `new Pool({ max: 1, options: "-c jit=off" })` |
 | `log.js` | letzte 200 Zeilen + SSE-Stream `/api/log` |
 | `public/` | `app.js` (Navigation + Seiten), `feature-panel.js` (Panels aus den Definitionen), `recipes.js`/`pantry.js` (Rezeptseiten), `lib.js` (`api`, `el`, `icon`, `throttle`, `errorBox`, `showPage`, `breadcrumb`, `cardGrid`, `plural`), `style.css`, `login.*` |
@@ -204,13 +208,19 @@ Routen: `/api/health` (ohne Login, für den Deploy), `/api/login|logout|me`, `/a
 `/api/rooms/:id`, `/api/devices/:id` (+`/settings`, `/pinned`), `/api/features/:id`
 (+`/state`, `/active`, `/settings`), `/api/log`; dazu `/api/recipes` (+`/:id`, `/:id/delete`,
 `/:id/ingredients`, `/:id/shopping-list`, `/:id/image` (+`/delete`)), `/api/ingredients`,
-`/api/tags`, `/api/pantry` (+`/:ingredientId/delete`) und `/api/mcp`.
+`/api/tags`, `/api/pantry` (+`/:ingredientId/delete`) und `/api/mcp`; dazu
+`POST /api/recipes/:id/bring` (Knopf „An Bring! senden“) und die OAuth-Routen:
+`/.well-known/oauth-protected-resource` (+`/api/mcp`), `/.well-known/oauth-authorization-server`,
+`POST /oauth/register`, `POST /oauth/token`, `/oauth/authorize` (Freigabe-Seite),
+`/api/oauth/client`, `POST /api/oauth/authorize`.
 Seiten: `/rooms`, `/rooms/:id`, `/devices/:id`, `/recipes`, `/recipes/new`, `/recipes/:id`
-(`?edit=1` zum Bearbeiten), `/pantry`.
+(`?edit=1` zum Bearbeiten), `/pantry`, `/oauth/authorize` (`consent.html` + `consent.js`).
 
 Umgebung: `PORT` (5000), `HOST`, `PG*`, `UDP_HOST` (127.0.0.1),
-`RECIPE_IMAGE_DIR` (`/var/lib/luca-smart-home/recipe-images`). Start: `sudo node server.js`
-(root wegen der LEDs).
+`RECIPE_IMAGE_DIR` (`/var/lib/luca-smart-home/recipe-images`), `PUBLIC_URL` (optional, öffentliche
+Adresse für die OAuth-Metadaten; sonst die Adresse der Anfrage), `BRING_EMAIL` / `BRING_PASSWORD`
+/ `BRING_LIST_UUID` (Bring!, alle optional; `BRING_API_URL` nur zum Testen gegen eine Attrappe).
+Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
 
 **Entscheidungen mit Grund:**
 - `jit=off`: PostgreSQL schätzt die rekursive View völlig falsch ein und compiliert die Abfrage
@@ -274,13 +284,37 @@ erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` dir
   erreichbar. Token anlegen: `sudo node user.js token add <benutzer> <name> [tage]` — es wird
   genau einmal angezeigt, gespeichert ist nur der SHA-256-Hash. Falsche Tokens zählen in dieselbe
   Sperre wie falsche Passwörter.
-- Einhängen: `claude mcp add --transport http rezepte https://<adresse>/api/mcp --header
-  "Authorization: Bearer …"`. In claude.ai und der Handy-App geht das noch nicht, dafür bräuchte
-  es OAuth (offener Punkt).
-- Bring! läuft **nicht** auf dem Pi: Luca hängt am PC
-  [florianwittkamp/bring-mcp](https://github.com/florianwittkamp/bring-mcp) als zweiten Konnektor
-  ein, `plan_shopping_list` liefert passend `{ name, spec }`. Vom Handy aus geht die
-  Bring!-Übergabe deshalb noch nicht.
+- Einhängen in Claude Code: `claude mcp add --transport http rezepte https://<adresse>/api/mcp
+  --header "Authorization: Bearer …"`. In claude.ai und der Handy-App: als eigenen Konnektor mit
+  der Adresse `https://<adresse>/api/mcp` hinzufügen, ohne Token — der Rest ist OAuth (unten).
+- **OAuth (`oauth.js`)**: der Pi ist sein eigener kleiner Autorisierungsserver und benutzt das
+  bestehende Login. Ablauf: `/api/mcp` ohne Token → `401` mit `WWW-Authenticate: Bearer
+  resource_metadata=…` → die beiden `.well-known`-Seiten → `POST /oauth/register` (dynamisch,
+  nur öffentliche Clients, Rücksprung nur `https://` oder `http://localhost`) →
+  `/oauth/authorize` (ohne Cookie Umleitung auf `/login?next=…`, dann die Freigabe-Seite) →
+  `POST /oauth/token` mit PKCE-S256. Access-Token sind normale Zeilen in `api_tokens` (Name
+  `oauth:<client_id>`, 1 Stunde, pro Benutzer und Client genau eines), Refresh-Token 30 Tage und
+  bei jeder Benutzung ausgetauscht, der Code gilt 10 Minuten und genau einen Versuch (auch einen
+  falschen). Die Freigabe geht nur mit Cookie-Login, nie mit einem Bearer-Token — ein
+  gestohlenes Token soll keine weiteren ausstellen. **Der Token gilt für die ganze API des
+  Benutzers**, nicht nur für `/api/mcp` (das steht auch auf der Freigabe-Seite). Widerrufen:
+  `sudo node user.js token delete <benutzer> oauth:<client_id>`. Fehler dieser Endpunkte haben die
+  RFC-Form `{ error, error_description }`, nicht `{ error: "Text" }`.
+  **Nicht gegen claude.ai selbst geprüft** — nur gegen die Spec und eigene Aufrufe (siehe
+  „Testen“); der erste echte Versuch ist der Test.
+- **Bring! (`bring.js`)** läuft auf dem Pi, damit die Kette auch vom Handy aus geht. Bring! hat
+  **keine offizielle API**; Pfade, Header und Body sind aus
+  [miaucl/bring-api](https://github.com/miaucl/bring-api) übernommen und können ohne Vorwarnung
+  brechen. Darum eigene Datei: fehlen `BRING_EMAIL`/`BRING_PASSWORD`, antworten die Werkzeuge
+  „nicht eingerichtet“ (503), ein Fehler von Bring! kommt als 502 — die Rezepte laufen immer
+  weiter. Das Token liegt nur im Speicher (Erneuern per `refresh_token`, sonst neu anmelden).
+  Werkzeuge: `bring_lists`, `bring_list_items`, `bring_add_items`; Knopf auf der Rezeptseite
+  (erscheint erst unter der Vorschau). **Schreiben nur auf ausdrücklichen Befehl:**
+  `plan_shopping_list` ist die Vorschau, `bring_add_items` der einzige schreibende Aufruf; die
+  Werkzeugbeschreibung verlangt erst das Ja des Benutzers. Was schon auf der Liste steht (gleicher
+  Name), wird **nicht** überschrieben, sondern als `already_on_list` gemeldet — Bring! würde sonst
+  die Menge eines fremden Eintrags ersetzen. Bei mehreren Listen wird nicht geraten (geteilte
+  Liste): ohne `list` und ohne `BRING_LIST_UUID` kommt ein Fehler mit den Namen.
 
 ## Deploy
 
@@ -299,6 +333,9 @@ Deploy kopiert — sonst wären die Bilder nach jedem Deploy weg.
 
 GitHub: Secrets `SSH_PASSWORD`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `DB_PASSWORD`;
 Variablen `SSH_USER`, `SERVER_IP`, `DB_USER`, `DB_NAME`.
+Optional: Secrets `BRING_EMAIL`, `BRING_PASSWORD`, `BRING_LIST_UUID` und Variable `PUBLIC_URL`
+(z. B. `https://home.example.com`) — fehlen sie, steht die jeweilige Zeile nicht in
+`/etc/luca-smart-home.env` und der Deploy läuft trotzdem.
 
 ## Testen (Windows, alles in Docker)
 
@@ -340,12 +377,12 @@ Die Oberfläche lässt sich im eingebauten Browser prüfen; auch auf 375 px Brei
 
 ## Offene Punkte
 
-- **OAuth für den MCP-Server**, damit der Konnektor direkt in claude.ai und der Handy-App
-  eingehängt werden kann: `/.well-known/oauth-protected-resource` und
-  `/.well-known/oauth-authorization-server`, dynamische Client-Registrierung, `/authorize` über
-  das bestehende Login, `/token` mit PKCE-S256, `401` mit `WWW-Authenticate`. Die Tokens landen
-  in derselben `api_tokens`-Tabelle.
-- Ein gehosteter Bring!-MCP, damit die Übergabe auch vom Handy aus geht.
+- **OAuth und Bring! sind gebaut, aber noch nie gegen die echten Dienste gelaufen.** Getestet
+  wurde gegen eine Attrappe der Bring!-API und mit eigenen Aufrufen für OAuth. Beim ersten
+  Einhängen in claude.ai und beim ersten echten Bring!-Eintrag genau hinsehen (Pfade, Header,
+  Form des Batch-Bodys; Spec-Fassung von OAuth/MCP).
+- OAuth-Token auf `/api/mcp` beschränken (heute gilt es für die ganze API, siehe MCP-Abschnitt).
+- Aufräumen läuft nur beim Registrieren eines Clients (`oauth.js`), nicht zeitgesteuert.
 - Der Name-CHECK (`^[a-z][a-z0-9_-]*$`) wird bei vorhandenen Tabellen nicht ersetzt; wenn er
   sich ändern soll, in den `DO`-Block zu den anderen Constraints aufnehmen.
 - `ambilight.c` ist noch einthreadig (Aufnahme und Ausgabe in einer Schleife).

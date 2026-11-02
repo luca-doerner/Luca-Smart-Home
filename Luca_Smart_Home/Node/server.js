@@ -19,6 +19,11 @@
  *   UDP_HOST       receiver of the UDP messages of the services (default 127.0.0.1)
  *   RECIPE_IMAGE_DIR
  *                  folder of the recipe pictures (default /var/lib/luca-smart-home/recipe-images)
+ *   PUBLIC_URL     (optional) public address, e.g. https://home.example.com; used by the OAuth
+ *                  metadata (oauth.js). Without it the address of the request is used.
+ *   BRING_EMAIL, BRING_PASSWORD, BRING_LIST_UUID
+ *                  Bring! shopping list (bring.js); without them only the Bring! buttons and
+ *                  tools answer "nicht eingerichtet", everything else works
  */
 const http = require("http");
 const fs = require("fs");
@@ -32,6 +37,8 @@ const features = require("./features");
 const recipes = require("./recipes");
 const pantry = require("./pantry");
 const mcp = require("./mcp");
+const bring = require("./bring");
+const oauth = require("./oauth");
 
 /*************** Configuration ****************************************************************/
 const PORT = Number(process.env.PORT) || 5000;
@@ -86,6 +93,35 @@ function readJson(req, limit = MAX_JSON) {
             } catch {
                 reject(new HttpError(400, "Ungültiges JSON"));
             }
+        });
+        req.on("error", reject);
+    });
+}
+
+// Formular- oder JSON-Körper, nur für /oauth/token: das schreibt OAuth als
+// application/x-www-form-urlencoded vor. Ein fremdes Formular kann so etwas senden, aber der
+// Endpunkt wertet kein Cookie aus — Code und PKCE sind die Berechtigung, nicht die Anmeldung.
+async function readTokenRequest(req) {
+    const type = req.headers["content-type"] ?? "";
+    if (type.startsWith("application/json"))
+        return readJson(req);
+    if (!type.startsWith("application/x-www-form-urlencoded"))
+        throw new oauth.OAuthError(400, "invalid_request", "Content-Type muss application/x-www-form-urlencoded sein");
+    return new Promise((resolve, reject) => {
+        let body = "";
+        let tooBig = false;
+        req.on("data", (chunk) => {
+            if (tooBig)
+                return;
+            body += chunk;
+            if (body.length > MAX_JSON) {
+                tooBig = true;
+                reject(new oauth.OAuthError(413, "invalid_request", "Anfrage zu groß"));
+            }
+        });
+        req.on("end", () => {
+            if (!tooBig)
+                resolve(Object.fromEntries(new URLSearchParams(body)));
         });
         req.on("error", reject);
     });
@@ -301,6 +337,12 @@ const ROUTES = [
         const { searchParams } = new URL(req.url, "http://localhost");
         sendJson(res, 200, await recipes.getShoppingList(Number(id), searchParams.get("servings")));
     }],
+    // Knopf „An Bring! senden“: { servings?, list? }. Schreibt in eine geteilte Liste, deshalb
+    // nur auf ausdrücklichen Klick; die Vorschau ist /shopping-list
+    ["POST", /^\/api\/recipes\/(\d+)\/bring$/, async (req, res, id) => {
+        const { servings, list } = await readJson(req);
+        sendJson(res, 200, await bring.sendRecipes([Number(id)], servings, list));
+    }],
     // das Bild kommt als rohe Bytes, der Typ wird an den ersten Bytes geprüft (recipes.js)
     ["POST", /^\/api\/recipes\/(\d+)\/image$/, async (req, res, id) => {
         const body = await readImageBody(req, recipes.MAX_IMAGE_BYTES);
@@ -338,6 +380,24 @@ const ROUTES = [
     ["GET", /^\/api\/mcp$/, (req, res) => mcp.methodNotAllowed(res)],
     ["DELETE", /^\/api\/mcp$/, (req, res) => mcp.methodNotAllowed(res)],
 
+    /*
+     * OAuth (oauth.js), damit claude.ai und die Handy-App den MCP-Server einhängen können.
+     * Öffentlich sind nur Metadaten, Registrierung und Token-Abruf; die Freigabe-Seite und ihre
+     * API verlangen das normale Login (ohne Cookie: Umleitung auf /login?next=...).
+     */
+    ["GET", /^\/\.well-known\/oauth-protected-resource(?:\/api\/mcp)?$/, (req, res) => oauth.protectedResourceMetadata(req, res)],
+    ["GET", /^\/\.well-known\/oauth-authorization-server$/, (req, res) => oauth.authorizationServerMetadata(req, res)],
+    ["OPTIONS", /^\/(?:\.well-known\/[\w-]+(?:\/api\/mcp)?|oauth\/(?:register|token))$/, (req, res) => oauth.preflight(req, res)],
+    ["POST", /^\/oauth\/register$/, async (req, res) => oauth.register(req, res, await readJson(req))],
+    ["POST", /^\/oauth\/token$/, async (req, res) => oauth.token(req, res, await readTokenRequest(req))],
+    ["GET", /^\/oauth\/authorize$/, (req, res) => serveFile(req, res, "consent.html")],
+    ["GET", /^\/api\/oauth\/client$/, async (req, res) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, await oauth.describeClient(searchParams.get("client_id"), searchParams.get("redirect_uri")));
+    }],
+    ["POST", /^\/api\/oauth\/authorize$/, async (req, res) =>
+        sendJson(res, 200, await oauth.decide(req.user, await readJson(req)))],
+
     // output of the feature programs and server messages as Server-Sent Events
     ["GET", /^\/api\/log$/, (req, res) => streamLog(req, res)],
 ];
@@ -349,6 +409,10 @@ const PUBLIC = [
     ["POST", /^\/api\/logout$/],
     ["GET", /^\/api\/health$/],
     ["GET", /^\/(login\.js|style\.css)$/],
+    // OAuth für Programme (oauth.js): Metadaten, Registrierung, Token-Abruf
+    ["GET", /^\/\.well-known\/oauth-(protected-resource(\/api\/mcp)?|authorization-server)$/],
+    ["OPTIONS", /^\/(\.well-known\/[\w-]+(\/api\/mcp)?|oauth\/(register|token))$/],
+    ["POST", /^\/oauth\/(register|token)$/],
 ];
 
 async function handle(req, res) {
@@ -357,8 +421,13 @@ async function handle(req, res) {
         req.user = await auth.userFromRequest(req, res);
         const isPublic = PUBLIC.some(([method, pattern]) => req.method === method && pattern.test(url.pathname));
         if (!req.user && !isPublic) {
-            if (url.pathname.startsWith("/api/"))
+            if (url.pathname.startsWith("/api/")) {
+                // der Hinweis, wo ein MCP-Client sich anmelden kann (RFC 9728): daran beginnt
+                // der OAuth-Ablauf von claude.ai
+                if (url.pathname === "/api/mcp")
+                    res.setHeader("WWW-Authenticate", oauth.challenge(req));
                 throw new HttpError(401, "Nicht angemeldet");
+            }
             return redirect(res, `/login?next=${encodeURIComponent(url.pathname + url.search)}`);
         }
 
@@ -371,6 +440,8 @@ async function handle(req, res) {
             return await serveFile(req, res, url.pathname.slice(1));
         sendJson(res, 404, { error: "Nicht gefunden" });
     } catch (err) {
+        if (err instanceof oauth.OAuthError)
+            return oauth.sendError(res, err);
         if (!(err instanceof HttpError))
             console.error(err);
         if (!res.headersSent)

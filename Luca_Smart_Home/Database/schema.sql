@@ -385,6 +385,38 @@ CREATE INDEX IF NOT EXISTS api_tokens_user_id_idx ON api_tokens (user_id);
 -- so "user.js token delete <benutzer> <name>" always means exactly one token
 CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_user_name_idx ON api_tokens (user_id, lower(name));
 
+-- OAuth for claude.ai and the phone app (Node/oauth.js): the Pi is its own small authorization
+-- server. The access tokens of OAuth are ordinary rows in api_tokens (named "oauth:<client_id>"),
+-- so mcp.js and auth.js do not know the difference. Only what OAuth adds lives here.
+--
+-- oauth_clients:        programs that registered themselves (dynamic client registration, RFC 7591);
+--                       all are public clients, there is no client secret, PKCE protects the code
+-- oauth_codes:          the one-time code between the consent page and the token request; only the
+--                       hash is stored, it lives a few minutes and is deleted when it is used
+-- oauth_refresh_tokens: the long-lived part; rotated on every use (the old one is deleted)
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id     TEXT PRIMARY KEY,
+    client_name   TEXT NOT NULL,
+    redirect_uris TEXT[] NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+    code_hash      TEXT PRIMARY KEY,
+    client_id      TEXT NOT NULL REFERENCES oauth_clients (client_id) ON DELETE CASCADE,
+    user_id        BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    redirect_uri   TEXT NOT NULL,
+    code_challenge TEXT NOT NULL,   -- PKCE, always S256
+    expires_at     TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+    token_hash  TEXT PRIMARY KEY,
+    client_id   TEXT NOT NULL REFERENCES oauth_clients (client_id) ON DELETE CASCADE,
+    user_id     BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+
 -- Full text search over the name, the tags, the ingredients and the text of a recipe.
 --
 -- A view and not a stored tsvector column: the text comes from three tables, a GENERATED column

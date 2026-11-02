@@ -166,6 +166,30 @@ h4 { font-size: 0.95rem; margin: 24px 0 12px; color: var(--muted); font-weight: 
     margin: 0 0 16px;
 }
 
+/* Freigabe-Seite (consent.html) und der Bring!-Knopf unter der Einkaufsliste */
+.consent-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: flex-end;
+}
+
+.consent-actions[hidden] {
+    display: none;
+}
+
+.bring-send {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.bring-send .hint {
+    margin: 0;
+}
+
 .menu-toggle {
     display: none;
     padding: 6px;

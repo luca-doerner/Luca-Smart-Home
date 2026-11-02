@@ -239,4 +239,6 @@ async function logout(req, res) {
 module.exports = {
     hashPassword, checkPasswordRules, userFromRequest, login, logout,
     createApiToken, listApiTokens, deleteApiToken,
+    // für oauth.js: dieselbe Sperre und derselbe Hash wie bei Login und Bearer-Token
+    tokenHash, clientIp, blocked, recordFailure,
 };

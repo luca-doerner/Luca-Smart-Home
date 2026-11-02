@@ -32,6 +32,7 @@
  */
 const recipes = require("./recipes");
 const pantry = require("./pantry");
+const bring = require("./bring");
 const HttpError = require("./http-error");
 const { log } = require("./log");
 
@@ -45,8 +46,9 @@ const SUPPORTED_VERSIONS = [MODERN_VERSION, ...LEGACY_VERSIONS];
 const LEGACY_FALLBACK = "2025-06-18";
 
 const INSTRUCTIONS = "Rezepte, Zutaten und Vorrat aus Lucas Smart Home. Typischer Ablauf: "
-    + "search_recipes, dann get_recipe, dann plan_shopping_list. Die Einträge in from_pantry "
-    + "einer Einkaufsliste gehören nicht auf die Liste, müssen dem Benutzer aber genannt werden.";
+    + "search_recipes, dann get_recipe, dann plan_shopping_list, nach dem Ja des Benutzers "
+    + "bring_add_items. Die Einträge in from_pantry einer Einkaufsliste gehören nicht auf die "
+    + "Liste, müssen dem Benutzer aber genannt werden.";
 
 /* JSON-RPC- und MCP-Fehlercodes (MCP legt -32020 und -32022 fest) */
 const INVALID_REQUEST = -32600;
@@ -66,6 +68,9 @@ const object = (properties, required = []) => ({ type: "object", properties, req
 
 // "keine Parameter": ausdrücklich nur ein leeres Objekt, so empfiehlt es die Spec
 const NO_ARGS = { type: "object", additionalProperties: false };
+
+const BRING_LIST = text("Name oder list_uuid der Bring!-Liste (bring_lists zeigt sie). Weglassen = "
+    + "die Standardliste des Servers, oder die einzige Liste.");
 
 const SERVINGS = integer("Für wie viele Portionen gerechnet werden soll. Weglassen = die "
     + "Portionszahl, die im Rezept steht.", { minimum: 1, maximum: 100 });
@@ -220,6 +225,41 @@ const TOOLS = [
             + "search_recipes.",
         inputSchema: NO_ARGS,
         run: async () => ({ tags: await recipes.listTags() }),
+    },
+    {
+        name: "bring_lists",
+        title: "Bring!-Listen",
+        description: "Die Einkaufslisten im Bring!-Konto, mit Name und list_uuid.",
+        inputSchema: NO_ARGS,
+        run: async () => ({ lists: await bring.lists() }),
+    },
+    {
+        name: "bring_list_items",
+        title: "Bring!-Liste lesen",
+        description: "Was schon auf einer Bring!-Liste steht. Vor bring_add_items aufrufen, wenn "
+            + "Doppeleinträge vermieden werden sollen.",
+        inputSchema: object({ list: BRING_LIST }),
+        run: ({ list }) => bring.listItems(list),
+    },
+    {
+        name: "bring_add_items",
+        title: "In Bring! eintragen",
+        description: "Trägt Einträge in eine Bring!-Liste ein. items ist genau die Ausgabe von "
+            + "plan_shopping_list (name, spec) — nichts umrechnen, nichts aus from_pantry "
+            + "hinzufügen.\n\n"
+            + "Das SCHREIBT in eine geteilte Liste, andere sehen es sofort. Deshalb zuerst die "
+            + "Vorschau (plan_shopping_list) dem Benutzer zeigen und erst nach seinem Ja "
+            + "eintragen.\n\n"
+            + "Einträge, die schon auf der Liste stehen, werden nicht überschrieben, sondern in "
+            + "already_on_list gemeldet — nenne sie dem Benutzer.",
+        inputSchema: object({
+            items: list(object({
+                name: text("Name des Artikels, wie in plan_shopping_list."),
+                spec: text("Menge, wie in plan_shopping_list, z. B. „750 g“."),
+            }, ["name"]), "Die items aus plan_shopping_list."),
+            list: BRING_LIST,
+        }, ["items"]),
+        run: ({ items, list: target }) => bring.addItems(items, target),
     },
 ];
 

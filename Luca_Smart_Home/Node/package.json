@@ -8,7 +8,7 @@
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=16.9"
+    "node": ">=18"
   },
   "dependencies": {
     "pg": "^8.23.0"
