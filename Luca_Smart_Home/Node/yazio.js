@@ -14,10 +14,16 @@
  * und den „Portion nach YAZIO“-Knopf mitnehmen: er kommt als 424 (HttpError.UPSTREAM), die Rezepte laufen weiter.
  *
  * Quellen (beim Bau gelesen, nicht gegen das echte YAZIO geprüft):
- *   github.com/juriadams/yazio       src/api/**, src/utils/constants.ts (TypeScript, Basis /v20)
+ *   github.com/juriadams/yazio       src/api/**, src/utils/constants.ts (TypeScript, Basis /v20, vorher /v15)
  *   github.com/saganos/yazio_public_api   swagger.json (Basis /v15)
  * Was dort steht und was sich widerspricht:
- *   - Basis-URL: juriadams /v20, saganos /v15. Hier /v20 (YAZIO_API_URL überschreibt es).
+ *   - Basis-URL: juriadams /v20, saganos /v15 — und /v20 geht NICHT: beim ersten echten Test
+ *     antwortete YAZIO auf jeden /user/…-Pfad mit 403 {"error":"version_blocked"}, die Produkt-
+ *     suche ging durch. Ohne Anmeldung nachgemessen (nur GET auf /user/goals/unmodified): v10 bis
+ *     v19 antworten 401 (gültig), v20 bis v22 403 version_blocked, ab v23 und bis v5 410 (weg).
+ *     Darum hier /v15, die Version aus dem Swagger und aus dem juriadams-Stand vor seinem Wechsel
+ *     auf v20 (YAZIO_API_URL überschreibt es). Wird auch v15 gesperrt, ist v19 der nächste
+ *     Kandidat — die Meldung nennt den Grund (reason()), das Log schreibt ihn mit.
  *   - Token: POST /oauth/token mit client_id/client_secret (fest in der App, öffentlich in allen
  *     Clients, also kein Geheimnis) und grant_type password bzw. refresh_token. juriadams schickt
  *     JSON, saganos schreibt application/x-www-form-urlencoded vor. Darum probiert tokenRequest
@@ -52,7 +58,7 @@ const { encrypt, decrypt } = require("./secret");
 const { log } = require("./log");
 
 // YAZIO_API_URL gibt es nur zum Testen gegen einen Attrappen-Server, im Betrieb bleibt es leer
-const BASE_URL = (process.env.YAZIO_API_URL || "https://yzapi.yazio.com/v20").replace(/\/+$/, "");
+const BASE_URL = (process.env.YAZIO_API_URL || "https://yzapi.yazio.com/v15").replace(/\/+$/, "");
 const TIMEOUT_MS = 15000;
 // so viele Sekunden vor dem Ablauf wird das Token schon erneuert
 const EXPIRY_MARGIN_S = 60;
@@ -150,7 +156,7 @@ async function reason(response) {
     const data = await response.clone().json().catch(() => null);
     const text = [data?.error_description, data?.message, data?.error].find((value) => typeof value === "string");
     if (text)
-        return text.replace(/s+/g, " ").trim().slice(0, 120);
+        return text.replace(/\s+/g, " ").trim().slice(0, 120);
     const type = (response.headers.get("content-type") || "").split(";")[0].trim();
     return type ? `Antwort vom Typ ${type}` : "";
 }

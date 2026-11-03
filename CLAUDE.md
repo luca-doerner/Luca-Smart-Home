@@ -386,7 +386,13 @@ erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` dir
   die Quellen (Pfade, Bodies, Einheiten) stehen als Kommentar oben in `yazio.js`:
   [juriadams/yazio](https://github.com/juriadams/yazio) (Basis `/v20`, Token als JSON) und
   [saganos/yazio_public_api](https://github.com/saganos/yazio_public_api) (Basis `/v15`, Token als
-  `x-www-form-urlencoded`). Sie widersprechen sich, deshalb nimmt `tokenRequest` JSON und
+  `x-www-form-urlencoded`).
+  **Basis ist `/v15`, nicht `/v20`:** `/v20` liefert für alle `/user/…`-Pfade `403
+  {"error":"version_blocked"}` (so aufgefallen beim ersten echten Test; die Produktsuche ist nicht
+  gesperrt und ging durch). Ohne Anmeldung nachgemessen (nur GET): v10–v19 antworten `401`
+  (gültig), v20–v22 `version_blocked`, ab v23 und bis v5 `410`. Fällt auch `/v15` weg, ist `v19`
+  der nächste Kandidat; `YAZIO_API_URL` überschreibt die Basis.
+  Bei den Tokens widersprechen sich die Quellen, deshalb nimmt `tokenRequest` JSON und
   probiert die andere Form nur, wenn der Server die erste nicht versteht (415, oder 400 **ohne**
   OAuth-Fehlerfeld — ein `invalid_grant` heißt „verstanden, Passwort falsch“) und merkt sich, was
   ging. Die Anmeldung kann gegen **Kontosperre** und die Nutzungsbedingungen laufen — Luca hat das
@@ -479,11 +485,11 @@ wird dort mit einem Testbenutzer (`node user.js add …`, Passwort per Pipe); mi
 (Ereignisse auslösen, `requestSubmit()`), wenn das Fenster nicht im Vordergrund ist.
 
 YAZIO/Bring! testet man gegen eine **Attrappe**: ein kleiner Node-Server, der die Pfade
-nachstellt (`/v20/oauth/token` in JSON und als Formular, `/user/consumed-items` GET/POST/DELETE,
+nachstellt (`/v15/oauth/token` in JSON und als Formular, `/user/consumed-items` GET/POST/DELETE,
 `/user/widgets/daily-summary`, `/user/goals/unmodified`, `/user/bodyvalues/weight/last`,
 `/products/search`, `/products/:id`), jede Anfrage mitprotokolliert (um die Bodies zu prüfen) und
 mit Schaltern für „Token abgelaufen“, „refresh_token wechselt“, „nur Formular“, „ausgefallen“.
-Server mit `YAZIO_API_URL=http://127.0.0.1:<port>/v20` und `SECRET_KEY_FILE=<Temp>` starten.
+Server mit `YAZIO_API_URL=http://127.0.0.1:<port>/v15` und `SECRET_KEY_FILE=<Temp>` starten.
 Zu prüfen: Anmelden (Cookie ja, Token `403`), falsches Passwort und Sperre nach 10, Rezept mit
 Nährwerten (die Zahlen im POST-Body nachrechnen), Löschen, abgelaufenes Token (genau **eine**
 Erneuerung bei parallelen Anfragen), Ausfall (`424`, Rezepte laufen weiter), und dass alte
@@ -508,7 +514,9 @@ Bring!-Werte mit `secret.js` lesbar bleiben (mit dem alten `encrypt` aus `git sh
 - **YAZIO ist gebaut, aber noch nie gegen das echte YAZIO gelaufen** — nur gegen eine Attrappe
   und den gelesenen Quelltext der Community-Clients. Beim ersten echten Versuch (mit Luca, nach
   dem Deploy) in dieser Reihenfolge prüfen und jeweils nachsehen, was YAZIO antwortet:
-  1. **Anmelden**: Basis `/v20` oder `/v15`, JSON oder Formular? (`tokenRequest` probiert beides.)
+  1. **Anmelden**: ging am 2026-11-03 beim ersten Versuch. **Lesen** scheiterte an `/v20`
+     (`version_blocked`), seitdem Basis `/v15` — ob die `/user/…`-Pfade dort mit dem Token gehen,
+     ist noch nicht gesehen.
   2. **Lesen**: `yazio_day` für einen Tag mit Einträgen; stimmen Summe, Ziele, Wasser mit der App
      überein? Sind die Produkt-Nährwerte wirklich pro Gramm (`per_100` von etwas Bekanntem wie
      Haferflocken ≈ 370 kcal)? Kommt `/user/consumed-items` als Objekt mit drei Listen oder als
