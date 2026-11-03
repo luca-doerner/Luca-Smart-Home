@@ -1,21 +1,25 @@
 // the smart home page: navigation on the left, pages /rooms, /rooms/:id, /devices/:id
-// und die Rezepte (/recipes, /recipes/:id, /recipes/new, /pantry) aus recipes.js / pantry.js
+// und die Rezepte (/recipes, /recipes/:id, /recipes/new, /pantry) aus recipes.js / pantry.js,
+// das Ernährungstagebuch (/nutrition) aus nutrition.js
 import { api, breadcrumb, cardGrid, el, errorBox, icon, plural, showPage } from "./lib.js";
 import { renderFeature, settingsForm } from "./feature-panel.js";
 import { renderRecipeEditPage, renderRecipePage, renderRecipesPage } from "./recipes.js";
 import { renderPantryPage } from "./pantry.js";
 import { renderAccountPage } from "./account.js";
+import { renderNutritionPage } from "./nutrition.js";
 
 const EXPANDED_KEY = "smarthome.expanded";
 const DEVICE_POLL_MS = 5000;   // how often the dots of the feature tabs are updated
 const sidebar = document.getElementById("sidebar");
 
 /*************** Route ************************************************************************/
-// key of a navigation entry: "rooms", "room:<id>", "device:<id>", "recipes", "pantry" or "account"
+// key of a navigation entry: "rooms", "room:<id>", "device:<id>", "recipes", "pantry", "nutrition" or "account"
 function currentRoute() {
-    const [, page, id] = location.pathname.match(/^\/(rooms|devices|recipes|pantry|account)(?:\/(new|\d+))?$/) || [];
+    const [, page, id] = location.pathname.match(/^\/(rooms|devices|recipes|pantry|nutrition|account)(?:\/(new|\d+))?$/) || [];
     if (page === "account")
         return { page: "account", key: "account" };
+    if (page === "nutrition")
+        return { page: "nutrition", key: "nutrition" };
     if (page === "devices" && id)
         return { page: "device", id: Number(id), key: `device:${id}` };
     if (page === "rooms" && id)
@@ -72,6 +76,7 @@ function navigationEntries(tree) {
         },
         { key: "recipes", label: "Rezepte", href: "/recipes", icon: "book", children: [] },
         { key: "pantry", label: "Vorrat", href: "/pantry", icon: "pantry", children: [] },
+        { key: "nutrition", label: "Ernährung", href: "/nutrition", icon: "food", children: [] },
         { key: "account", label: "Konto", href: "/account", icon: "user", children: [] },
     ];
 }
@@ -420,6 +425,8 @@ async function init() {
             await renderRecipeEditPage(route.id);
         else if (route.page === "pantry")
             await renderPantryPage();
+        else if (route.page === "nutrition")
+            await renderNutritionPage();
         else if (route.page === "account")
             await renderAccountPage();
     } catch (err) {
@@ -427,6 +434,7 @@ async function init() {
         errors.show("page", `Seite konnte nicht geladen werden: ${err.message}`);
         const home = route.key === "rooms" ? { label: "Zimmer", href: "/rooms" }
             : route.key === "account" ? { label: "Konto", href: "/account" }
+            : route.key === "nutrition" ? { label: "Ernährung", href: "/nutrition" }
             : { label: "Rezepte", href: "/recipes" };
         showPage(breadcrumb([home, { label: "Fehler" }]), errors.node);
     }

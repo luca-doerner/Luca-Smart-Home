@@ -1473,3 +1473,104 @@ fieldset.choice legend {
     padding: 0 6px;
     font-weight: 600;
 }
+
+/*************** Ernährung (YAZIO) ************************************************************/
+/* Balken kcal / Eiweiß / Kohlenhydrate / Fett gegen das Tagesziel. Die Breite setzt nutrition.js
+   per style.width; über dem Ziel wird der Balken zur Warnfarbe, ohne dass er über den Rand ragt. */
+.meter {
+    margin-bottom: 12px;
+}
+
+.meter-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 4px 12px;
+    margin-bottom: 4px;
+}
+
+.meter-head .muted {
+    font-variant-numeric: tabular-nums;
+}
+
+.meter-track {
+    height: 10px;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+}
+
+.meter-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+}
+
+.meter-fill.over {
+    background: var(--error-text);
+}
+
+.date-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 8px;
+}
+
+.date-bar input[type="date"] {
+    min-width: 0;
+    padding: 8px 10px;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.date-label {
+    margin: 0 0 16px;
+    color: var(--muted);
+}
+
+/* Einträge eines Tages und Suchtreffer: Text links, Knopf rechts */
+.diary-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+}
+
+.diary-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.diary-list li:last-child {
+    border-bottom: 0;
+}
+
+.diary-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.diary-list .button {
+    flex-shrink: 0;
+}
+
+.add-form {
+    padding: 8px 0;
+}
+
+@media (max-width: 480px) {
+    .date-bar input[type="date"] {
+        flex: 1 1 140px;
+    }
+}

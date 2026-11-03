@@ -47,6 +47,8 @@ export function icon(name) {
         // Rezepte und Vorrat
         book: "M12 6v14M12 6C10 4.5 7 4 4 4v14c3 0 6 .5 8 2 2-1.5 5-2 8-2V4c-3 0-6 .5-8 2",
         pantry: "M5 8h14v12H5zM5 8l2-4h10l2 4M10 12h4",
+        // Besteck für die Ernährungsseite
+        food: "M7 3v7M4 3v5a3 3 0 0 0 6 0V3M7 11v10M17 3c-2.2 1.4-3 4-3 7h3v11",
         user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20c0-4 3.6-6 8-6s8 2 8 6",
         plus: "M12 5v14M5 12h14",
         trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",

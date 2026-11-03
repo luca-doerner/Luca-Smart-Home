@@ -8,6 +8,8 @@ brauchen in der Regel keinen neuen Server-Code, nur neue Zeilen in der Datenbank
 Daneben steht seit neuestem der **Rezeptteil** (Rezepte, Zutaten, Vorrat, Einkaufsliste) mit
 einem **MCP-Server**, über den eine KI die Rezepte benutzen kann. Für ihn gilt die Regel oben
 ausdrücklich **nicht**: er hat eigene Tabellen, eigene Routen und eigene Seiten (siehe unten).
+Ebenso der **YAZIO-Konnektor** (Kalorienzähler: Tagebuch lesen, Essen und Rezepte eintragen) —
+gebaut wie der Bring!-Konnektor, mit eigener Tabelle, eigenen Routen und der Seite „Ernährung“.
 
 Sprache: Code-Kommentare und Oberfläche sind deutsch bzw. gemischt deutsch/englisch, Benutzer
 und Commit-Messages deutsch.
@@ -35,14 +37,17 @@ Browser ──HTTP/JSON──> Node (server.js)
             <──SSE /api/log──  stdout/stderr der C-Programme
 
 KI ──HTTP/JSON-RPC + Bearer-Token──> /api/mcp (mcp.js) ──> recipes.js / pantry.js
-claude.ai / Handy ──OAuth (oauth.js)──> Access-Token ──> /api/mcp           └──> bring.js ──> Bring!
+claude.ai / Handy ──OAuth (oauth.js)──> Access-Token ──> /api/mcp           ├──> bring.js ──> Bring!
+                                                                            └──> yazio.js ──> YAZIO
+Browser ──> /api/yazio/*, /api/recipes/:id/yazio ──> yazio.js   (Seite „Ernährung“, Knopf am Rezept)
 ```
 
 ## Datenbank (`Database/schema.sql`)
 
 `rooms` → `devices` (verschachtelbar) → `features` → `setting_definitions` / `settings`,
 dazu `device_setting_definitions` / `device_settings`, `feature_kinds`, `users`, `sessions`,
-`api_tokens`, `bring_accounts` (das Bring!-Konto je Benutzer), die OAuth-Tabellen `oauth_clients` / `oauth_codes` / `oauth_refresh_tokens` und die
+`api_tokens`, `bring_accounts` / `yazio_accounts` (das Bring!- bzw. YAZIO-Konto je Benutzer), die
+OAuth-Tabellen `oauth_clients` / `oauth_codes` / `oauth_refresh_tokens` und die
 rekursive View `devices_with_room`.
 Der Rezeptteil steht daneben: `ingredients` → `recipes` → `recipe_ingredients` / `recipe_steps`,
 dazu `pantry_items` und die View `recipes_search`.
@@ -66,6 +71,14 @@ dazu `pantry_items` und die View `recipes_search`.
 - `recipes_search` ist eine View, kein gespeichertes `tsvector`-Feld: der Text kommt aus drei
   Tabellen, eine `GENERATED`-Spalte kann das nicht. Gewichte A–D (Name, Tags/Zutaten,
   Beschreibung, Schritte), gesucht mit `websearch_to_tsquery('german', …)`.
+- `recipes.nutrients` (JSONB) = Nährwerte **pro Portion**: `{ "kcal": 540, "protein": 32,
+  "carbs": 48, "fat": 21 }` (kcal und Gramm), `NULL` = unbekannt. Pro Portion und nicht fürs
+  ganze Rezept, damit eine geänderte Portionszahl sie nicht verfälscht. Der CHECK (genau diese
+  vier Zahlen, keine negativ) steht am Dateiende und wird bei jedem Lauf neu angelegt; ein
+  CHECK darf keine Unterabfrage haben, „keine anderen Schlüssel“ ist deshalb
+  `nutrients - 'kcal' - … = '{}'`.
+- `yazio_accounts` ist wie `bring_accounts` gebaut (Benutzer, E-Mail, `credentials` =
+  verschlüsselter `refresh_token`), nur ohne Standardliste.
 
 **Regeln, die hier immer gelten:**
 - Beide SQL-Dateien laufen bei jedem Deploy und müssen **idempotent** sein:
@@ -197,12 +210,14 @@ Kein Framework, nur `http`/`dgram`/`child_process` + `pg`.
 | `user.js` | `sudo node user.js add/password/delete/list` + `token add/list/delete` (keine Registrierungsseite) |
 | `recipes.js` | Rezepte, Zutaten, Tags, Skalieren, Einkaufsliste, Bilder |
 | `pantry.js` | der Vorrat (`pantry_items`) |
-| `mcp.js` | MCP-Server: JSON-RPC über `POST /api/mcp`, ruft `recipes.js`/`pantry.js`/`bring.js` direkt auf |
+| `mcp.js` | MCP-Server: JSON-RPC über `POST /api/mcp`, ruft `recipes.js`/`pantry.js`/`bring.js`/`yazio.js` direkt auf |
 | `bring.js` | Bring!-Konnektor je Benutzer (inoffizielle API per `fetch`, kein Zusatzpaket): Konto verbinden, Listen, Einträge hinzufügen |
+| `yazio.js` | YAZIO-Konnektor je Benutzer (inoffizielle API, wie `bring.js` gebaut): Konto verbinden, Tag/Ziele/Gewicht lesen, Produkte suchen, Essen eintragen und löschen, Rezept eintragen |
+| `secret.js` | `encrypt`/`decrypt` (AES-256-GCM) und der Schlüssel (`SECRET_KEY`/`SECRET_KEY_FILE`) — gemeinsam für Bring! und YAZIO |
 | `oauth.js` | OAuth 2.1 für claude.ai/Handy: Metadaten, Registrierung, Freigabe, Token (PKCE S256) |
 | `db.js` | `new Pool({ max: 1, options: "-c jit=off" })` |
 | `log.js` | letzte 200 Zeilen + SSE-Stream `/api/log` |
-| `public/` | `app.js` (Navigation + Seiten), `feature-panel.js` (Panels aus den Definitionen), `recipes.js`/`pantry.js` (Rezeptseiten), `lib.js` (`api`, `el`, `icon`, `throttle`, `errorBox`, `showPage`, `breadcrumb`, `cardGrid`, `plural`), `style.css`, `login.*` |
+| `public/` | `app.js` (Navigation + Seiten), `feature-panel.js` (Panels aus den Definitionen), `recipes.js`/`pantry.js` (Rezeptseiten), `nutrition.js` (Seite „Ernährung“, dazu die Helfer für den Rezeptknopf), `account.js` (Konto: Bring! und YAZIO), `lib.js` (`api`, `el`, `icon`, `throttle`, `errorBox`, `showPage`, `breadcrumb`, `cardGrid`, `plural`), `style.css`, `login.*` |
 
 Routen: `/api/health` (ohne Login, für den Deploy), `/api/login|logout|me`, `/api/navigation`,
 `/api/rooms/:id`, `/api/devices/:id` (+`/settings`, `/pinned`), `/api/features/:id`
@@ -210,18 +225,21 @@ Routen: `/api/health` (ohne Login, für den Deploy), `/api/login|logout|me`, `/a
 `/:id/ingredients`, `/:id/shopping-list`, `/:id/image` (+`/delete`)), `/api/ingredients`,
 `/api/tags`, `/api/pantry` (+`/:ingredientId/delete`) und `/api/mcp`; dazu
 `POST /api/recipes/:id/bring` (Knopf „An Bring! senden“), `/api/bring` (+`/lists`, `/login`,
-`/logout`, `/list`: das eigene Bring!-Konto) und die OAuth-Routen:
+`/logout`, `/list`: das eigene Bring!-Konto), `POST /api/recipes/:id/yazio` (Knopf „Portion nach
+YAZIO“: `{ portions, daytime, date? }`), `/api/yazio` (+`/login`, `/logout`: das eigene
+YAZIO-Konto; `/day?date=`, `/products?query=`, `POST /entries`, `POST /entries/:id/delete`: das
+Tagebuch) und die OAuth-Routen:
 `/.well-known/oauth-protected-resource` (+`/api/mcp`), `/.well-known/oauth-authorization-server`,
 `POST /oauth/register`, `POST /oauth/token`, `/oauth/authorize` (Freigabe-Seite),
 `/api/oauth/client`, `POST /api/oauth/authorize`.
 Seiten: `/rooms`, `/rooms/:id`, `/devices/:id`, `/recipes`, `/recipes/new`, `/recipes/:id`
-(`?edit=1` zum Bearbeiten), `/pantry`, `/account` (`account.js`), `/oauth/authorize` (`consent.html` + `consent.js`).
+(`?edit=1` zum Bearbeiten), `/pantry`, `/nutrition` (`?date=JJJJ-MM-TT`), `/account` (`account.js`), `/oauth/authorize` (`consent.html` + `consent.js`).
 
 Umgebung: `PORT` (5000), `HOST`, `PG*`, `UDP_HOST` (127.0.0.1),
 `RECIPE_IMAGE_DIR` (`/var/lib/luca-smart-home/recipe-images`), `PUBLIC_URL` (optional, öffentliche
 Adresse für die OAuth-Metadaten; sonst die Adresse der Anfrage), `SECRET_KEY` / `SECRET_KEY_FILE`
-(Schlüssel für die Bring!-Anmeldungen, siehe MCP-Abschnitt; `BRING_API_URL` nur zum Testen gegen
-eine Attrappe).
+(Schlüssel für die Bring!- und YAZIO-Anmeldungen, siehe MCP-Abschnitt; `BRING_API_URL` und
+`YAZIO_API_URL` nur zum Testen gegen eine Attrappe).
 Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
 
 **Entscheidungen mit Grund:**
@@ -291,6 +309,12 @@ Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
   Satz.
 - Mehrere Rezepte werden zusammengefasst: gleiche Zutat und gleiche Einheit werden addiert, eine
   Zutat ohne Menge („Butter zum Braten“) wird in den vorhandenen Eintrag eingehängt.
+- **Nährwerte** (`recipes.nutrients`) sind drei Zustände: nicht mitgeschickt (`undefined`: beim
+  Ändern bleibt der alte Wert, sonst müsste jede Änderung durch eine KI sie mitschicken),
+  `null` (löschen) oder ein Objekt (setzen). `saveRecipe` macht das mit
+  `CASE WHEN $11::boolean THEN … ELSE nutrients END`. Die Seite schickt das Feld **immer**
+  (alle vier Felder leer = `null`, teilweise ausgefüllt = Fehler im Browser), die KI hat
+  `set_recipe_nutrients` (`setNutrients`), das nur die Nährwerte ändert.
 
 ## MCP-Server (`Node/mcp.js`)
 
@@ -358,6 +382,42 @@ erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` dir
   Bring! kennt je Name nur einen. Bei mehreren Listen wird nicht geraten (geteilte
   Liste): ohne `list` und ohne Standardliste (auf der Seite „Konto“ gewählt) kommt ein Fehler
   mit den Namen.
+- **YAZIO (`yazio.js`)**: dieselbe Bauart wie Bring!, gleiche Gründe. **Keine offizielle API**;
+  die Quellen (Pfade, Bodies, Einheiten) stehen als Kommentar oben in `yazio.js`:
+  [juriadams/yazio](https://github.com/juriadams/yazio) (Basis `/v20`, Token als JSON) und
+  [saganos/yazio_public_api](https://github.com/saganos/yazio_public_api) (Basis `/v15`, Token als
+  `x-www-form-urlencoded`). Sie widersprechen sich, deshalb nimmt `tokenRequest` JSON und
+  probiert die andere Form nur, wenn der Server die erste nicht versteht (415, oder 400 **ohne**
+  OAuth-Fehlerfeld — ein `invalid_grant` heißt „verstanden, Passwort falsch“) und merkt sich, was
+  ging. Die Anmeldung kann gegen **Kontosperre** und die Nutzungsbedingungen laufen — Luca hat das
+  bewusst entschieden. Ein Fehler von YAZIO kommt als 502 und nimmt nur die `yazio_*`-Werkzeuge,
+  die Seite „Ernährung“ und den Rezeptknopf mit.
+  **Jeder Benutzer meldet sich selbst an** (Seite „Konto“, Tabelle `yazio_accounts`), Anmelden
+  und Trennen nur mit Cookie-Login. Passwort wird nicht gespeichert, nur der `refresh_token`
+  verschlüsselt (`secret.js`, derselbe Schlüssel wie Bring!). **Wechselt YAZIO den
+  `refresh_token` bei der Erneuerung, wird der neue gespeichert** (`refresh()`), sonst wäre man
+  nach dem nächsten Neustart abgemeldet. `client_id`/`client_secret` sind fest in der App und
+  öffentlich (`gitleaks:allow`).
+  Werkzeuge: lesend `yazio_day`, `yazio_goals`, `yazio_weight`, `yazio_search_products`,
+  `yazio_get_product`; schreibend `yazio_add_product`, `yazio_log_recipe`, `yazio_remove_entry`
+  und `set_recipe_nutrients` (das schreibt in die Rezepte, nicht nach YAZIO). **Schreiben nur
+  nach dem ausdrücklichen Ja des Benutzers** (steht in den Beschreibungen und in `INSTRUCTIONS`).
+  Wasser und Gewicht werden **nur gelesen**.
+  - Einheiten: Nährwerte eines **Produkts** gelten pro Gramm (`energy.energy` = kcal pro Gramm);
+    die Werkzeuge geben deshalb `per_100` (je 100 g/ml) aus. `amount` ist Gramm bzw. Milliliter.
+    Summen und Ziele eines Tages rechnet YAZIO (`/user/widgets/daily-summary`), nicht wir.
+  - **Rezept → YAZIO** (`logRecipe`): ein `simple_product` (freier Eintrag mit Namen und
+    Summen) „Chili con Carne (2 Portionen)“. Der Server rechnet Nährwerte pro Portion mal
+    `portions` — Seite und Werkzeug schicken nur die Portionszahl. Ohne Nährwerte im Rezept
+    `409` mit dem Hinweis, sie erst zu setzen. **Das Format eines `simple_product` beim
+    Schreiben steht in keiner der Quellen** (beim Lesen: `{ id, date, daytime, type, name,
+    nutrients, is_ai_generated }`); es wird die Spiegelform ohne `type` geschickt, siehe
+    „Offene Punkte“.
+  - `date` ist `JJJJ-MM-TT` (Standard heute in `Europe/Berlin`, der Pi läuft in UTC),
+    `daytime` ist `breakfast|lunch|dinner|snack`, Eintrags-ids sind UUIDs. Löschen nimmt die id
+    des **Eintrags** (aus `yazio_day`), nicht die des Produkts; YAZIO antwortet auch auf eine
+    unbekannte id mit Erfolg.
+  - Namen der Produkte im Tagebuch löst `day()` über `/products/:id` auf, im Speicher gecacht.
 
 ## Deploy
 
@@ -377,8 +437,8 @@ Deploy kopiert — sonst wären die Bilder nach jedem Deploy weg.
 GitHub: Secrets `SSH_PASSWORD`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`, `DB_PASSWORD`;
 Variablen `SSH_USER`, `SERVER_IP`, `DB_USER`, `DB_NAME`.
 Optional: Variable `PUBLIC_URL` (z. B. `https://home.example.com`) — fehlt sie, steht die Zeile
-nicht in `/etc/luca-smart-home.env` und der Deploy läuft trotzdem. Bring! braucht **keine**
-Secrets mehr: die Zugangsdaten gibt jeder Benutzer auf der Seite „Konto“ ein.
+nicht in `/etc/luca-smart-home.env` und der Deploy läuft trotzdem. Bring! und YAZIO brauchen
+**keine** Secrets: die Zugangsdaten gibt jeder Benutzer auf der Seite „Konto“ ein.
 
 ## Testen (Windows, alles in Docker)
 
@@ -406,7 +466,21 @@ Node-Seite: Container mit `-p 55432:5432` starten, dann den Server lokal gegen i
 (`PGHOST=127.0.0.1 PGPORT=55432 … PORT=5099 RECIPE_IMAGE_DIR=<Temp-Ordner> node server.js`) und
 mit `curl` durchgehen. Für den MCP-Teil vorher `node user.js token add luca test` — das Token
 geht dann als `Authorization: Bearer …` an `/api/mcp`.
-Die Oberfläche lässt sich im eingebauten Browser prüfen; auch auf 375 px Breite ansehen.
+Die Oberfläche lässt sich im eingebauten Browser prüfen; auch auf 375 px Breite ansehen. Eingeloggt
+wird dort mit einem Testbenutzer (`node user.js add …`, Passwort per Pipe); mit `form_input` und
+`ref` statt Koordinaten, und Interaktionen gehen zuverlässiger über `javascript_tool`
+(Ereignisse auslösen, `requestSubmit()`), wenn das Fenster nicht im Vordergrund ist.
+
+YAZIO/Bring! testet man gegen eine **Attrappe**: ein kleiner Node-Server, der die Pfade
+nachstellt (`/v20/oauth/token` in JSON und als Formular, `/user/consumed-items` GET/POST/DELETE,
+`/user/widgets/daily-summary`, `/user/goals/unmodified`, `/user/bodyvalues/weight/last`,
+`/products/search`, `/products/:id`), jede Anfrage mitprotokolliert (um die Bodies zu prüfen) und
+mit Schaltern für „Token abgelaufen“, „refresh_token wechselt“, „nur Formular“, „ausgefallen“.
+Server mit `YAZIO_API_URL=http://127.0.0.1:<port>/v20` und `SECRET_KEY_FILE=<Temp>` starten.
+Zu prüfen: Anmelden (Cookie ja, Token `403`), falsches Passwort und Sperre nach 10, Rezept mit
+Nährwerten (die Zahlen im POST-Body nachrechnen), Löschen, abgelaufenes Token (genau **eine**
+Erneuerung bei parallelen Anfragen), Ausfall (`502`, Rezepte laufen weiter), und dass alte
+Bring!-Werte mit `secret.js` lesbar bleiben (mit dem alten `encrypt` aus `git show` erzeugen).
 
 ## Zusammenarbeit
 
@@ -424,6 +498,22 @@ Die Oberfläche lässt sich im eingebauten Browser prüfen; auch auf 375 px Brei
   wurde gegen eine Attrappe der Bring!-API und mit eigenen Aufrufen für OAuth. Beim ersten
   Einhängen in claude.ai und beim ersten echten Bring!-Eintrag genau hinsehen (Pfade, Header,
   Form des Batch-Bodys; Spec-Fassung von OAuth/MCP).
+- **YAZIO ist gebaut, aber noch nie gegen das echte YAZIO gelaufen** — nur gegen eine Attrappe
+  und den gelesenen Quelltext der Community-Clients. Beim ersten echten Versuch (mit Luca, nach
+  dem Deploy) in dieser Reihenfolge prüfen und jeweils nachsehen, was YAZIO antwortet:
+  1. **Anmelden**: Basis `/v20` oder `/v15`, JSON oder Formular? (`tokenRequest` probiert beides.)
+  2. **Lesen**: `yazio_day` für einen Tag mit Einträgen; stimmen Summe, Ziele, Wasser mit der App
+     überein? Sind die Produkt-Nährwerte wirklich pro Gramm (`per_100` von etwas Bekanntem wie
+     Haferflocken ≈ 370 kcal)? Kommt `/user/consumed-items` als Objekt mit drei Listen oder als
+     Liste (`flattenEntries` kann beides)?
+  3. **Schreiben, größte Unbekannte**: ein `simple_product` per `yazio_log_recipe` — Body
+     `{ id, date, daytime, name, nutrients: { "energy.energy", "nutrient.protein",
+     "nutrient.carb", "nutrient.fat" }, is_ai_generated: false }`, `date` nur als Datum. Lehnt
+     YAZIO ab (422), steht in der Antwort nur „HTTP 422“ (Antwortkörper werden nie geloggt);
+     dann den Body gegen die App abgleichen (z. B. `date` mit Uhrzeit, `type` mitschicken). Danach
+     den Eintrag in der YAZIO-App ansehen und wieder löschen.
+  4. `yazio_add_product` mit `serving`/`serving_quantity` und `yazio_remove_entry`.
+  Dazu das Risiko der **Kontosperre** bei inoffizieller Nutzung.
 - OAuth-Token auf `/api/mcp` beschränken (heute gilt es für die ganze API, siehe MCP-Abschnitt).
 - Aufräumen läuft nur beim Registrieren eines Clients (`oauth.js`), nicht zeitgesteuert.
 - Der Name-CHECK (`^[a-z][a-z0-9_-]*$`) wird bei vorhandenen Tabellen nicht ersetzt; wenn er

@@ -319,6 +319,12 @@ CREATE TABLE IF NOT EXISTS recipes (
 
 CREATE UNIQUE INDEX IF NOT EXISTS recipes_name_idx ON recipes (lower(name));
 
+-- nutrition PER SERVING: {"kcal": 540, "protein": 32, "carbs": 48, "fat": 21} (kcal and grams),
+-- NULL = not known. Per serving and not for the whole recipe, so changing `servings` does not
+-- falsify it. YAZIO gets it multiplied by the portions that were eaten (Node/yazio.js). The rule
+-- for the shape is at the end of the file.
+ALTER TABLE recipes ADD COLUMN IF NOT EXISTS nutrients JSONB;
+
 -- tags && ARRAY['vegetarisch'] uses this index instead of reading every recipe
 CREATE INDEX IF NOT EXISTS recipes_tags_idx ON recipes USING GIN (tags);
 
@@ -403,6 +409,16 @@ CREATE TABLE IF NOT EXISTS bring_accounts (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- The YAZIO account of a user (Node/yazio.js), built exactly like bring_accounts: everybody logs in
+-- to their own account on the page "Konto", the password is never stored, only the refresh token
+-- of YAZIO, encrypted (credentials = "iv.tag.data", see secret.js).
+CREATE TABLE IF NOT EXISTS yazio_accounts (
+    user_id     BIGINT PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    email       TEXT NOT NULL,
+    credentials TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- OAuth for claude.ai and the phone app (Node/oauth.js): the Pi is its own small authorization
 -- server. The access tokens of OAuth are ordinary rows in api_tokens (named "oauth:<client_id>"),
 -- so mcp.js and auth.js do not know the difference. Only what OAuth adds lives here.
@@ -468,3 +484,22 @@ LEFT JOIN (
 ALTER TABLE recipes DROP CONSTRAINT IF EXISTS recipes_difficulty_check;
 ALTER TABLE recipes ADD CONSTRAINT recipes_difficulty_check
     CHECK (difficulty IS NULL OR difficulty IN ('einfach', 'mittel', 'schwer'));
+
+-- Same reason for the shape of recipes.nutrients: exactly these four numbers, none negative. A CHECK
+-- cannot contain a subquery, so "no other keys" is done by taking the four away and expecting
+-- nothing to be left.
+ALTER TABLE recipes DROP CONSTRAINT IF EXISTS recipes_nutrients_check;
+ALTER TABLE recipes ADD CONSTRAINT recipes_nutrients_check CHECK (
+    nutrients IS NULL OR (
+        jsonb_typeof(nutrients) = 'object'
+        AND nutrients ?& ARRAY['kcal', 'protein', 'carbs', 'fat']
+        AND nutrients - 'kcal' - 'protein' - 'carbs' - 'fat' = '{}'::jsonb
+        AND jsonb_typeof(nutrients -> 'kcal') = 'number'
+        AND jsonb_typeof(nutrients -> 'protein') = 'number'
+        AND jsonb_typeof(nutrients -> 'carbs') = 'number'
+        AND jsonb_typeof(nutrients -> 'fat') = 'number'
+        AND (nutrients ->> 'kcal')::numeric >= 0
+        AND (nutrients ->> 'protein')::numeric >= 0
+        AND (nutrients ->> 'carbs')::numeric >= 0
+        AND (nutrients ->> 'fat')::numeric >= 0
+    ));

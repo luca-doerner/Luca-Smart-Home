@@ -1,7 +1,7 @@
 /*
  * Web server of the smart home: rooms, nested devices and their features, plus the recipes.
  *
- * - pages: /rooms, /rooms/:id, /devices/:id, /recipes, /recipes/:id, /pantry
+ * - pages: /rooms, /rooms/:id, /devices/:id, /recipes, /recipes/:id, /pantry, /nutrition, /account
  *   (one page, public/index.html + public/app.js)
  * - features and their settings come from the database, their programs run in features.js
  * - recipes, ingredients and the shopping list are in recipes.js and pantry.js
@@ -22,7 +22,7 @@
  *   PUBLIC_URL     (optional) public address, e.g. https://home.example.com; used by the OAuth
  *                  metadata (oauth.js). Without it the address of the request is used.
  *   SECRET_KEY / SECRET_KEY_FILE
- *                  key that encrypts the Bring! logins in the database (bring.js); without
+ *                  key that encrypts the Bring! and YAZIO logins in the database (secret.js); without
  *                  SECRET_KEY a key file is created (default /var/lib/luca-smart-home/secret.key)
  */
 const http = require("http");
@@ -38,6 +38,7 @@ const recipes = require("./recipes");
 const pantry = require("./pantry");
 const mcp = require("./mcp");
 const bring = require("./bring");
+const yazio = require("./yazio");
 const oauth = require("./oauth");
 
 /*************** Configuration ****************************************************************/
@@ -250,7 +251,7 @@ const ROUTES = [
 
     // pages (the page itself loads its data from the API)
     ["GET", /^\/$/, (req, res) => redirect(res, "/rooms")],
-    ["GET", /^\/(rooms|rooms\/\d+|devices\/\d+|recipes|recipes\/new|recipes\/\d+|pantry|account)$/,
+    ["GET", /^\/(rooms|rooms\/\d+|devices\/\d+|recipes|recipes\/new|recipes\/\d+|pantry|nutrition|account)$/,
         (req, res) => serveFile(req, res, "index.html")],
     // old address of the ambilight page
     ["GET", /^\/ambilight$/, async (req, res) => {
@@ -370,6 +371,41 @@ const ROUTES = [
         const { list_uuid: listUuid } = await readJson(req);
         sendJson(res, 200, await bring.setDefaultList(req.user.id, listUuid ?? null));
     }],
+    // Knopf „Portion nach YAZIO“: { portions, daytime, date? }. Schreibt ins echte Tagebuch, deshalb
+    // nur auf ausdrücklichen Klick. Die Nährwerte × Portionen rechnet yazio.js, nicht die Seite
+    ["POST", /^\/api\/recipes\/(\d+)\/yazio$/, async (req, res, id) => {
+        const { portions, daytime, date } = await readJson(req);
+        sendJson(res, 200, await yazio.logRecipe(req.user.id, Number(id), portions, daytime, date));
+    }],
+
+    // das eigene YAZIO-Konto und das Tagebuch. Wie bei Bring!: Anmelden und Trennen nur mit dem
+    // Cookie-Login, ein Token (Claude, OAuth) soll das Konto nicht austauschen können
+    ["GET", /^\/api\/yazio$/, async (req, res) => sendJson(res, 200, await yazio.status(req.user.id))],
+    ["POST", /^\/api\/yazio\/login$/, async (req, res) => {
+        requireBrowserLogin(req);
+        const { email, password } = await readJson(req);
+        sendJson(res, 200, await yazio.connect(req.user.id, email, password));
+    }],
+    ["POST", /^\/api\/yazio\/logout$/, async (req, res) => {
+        requireBrowserLogin(req);
+        await readJson(req);
+        sendJson(res, 200, await yazio.disconnect(req.user.id));
+    }],
+    ["GET", /^\/api\/yazio\/day$/, async (req, res) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, await yazio.day(req.user.id, searchParams.get("date")));
+    }],
+    ["GET", /^\/api\/yazio\/products$/, async (req, res) => {
+        const { searchParams } = new URL(req.url, "http://localhost");
+        sendJson(res, 200, { products: await yazio.searchProducts(req.user.id, searchParams.get("query")) });
+    }],
+    ["POST", /^\/api\/yazio\/entries$/, async (req, res) =>
+        sendJson(res, 201, await yazio.addProduct(req.user.id, await readJson(req)))],
+    ["POST", /^\/api\/yazio\/entries\/([0-9a-fA-F-]+)\/delete$/, async (req, res, id) => {
+        await readJson(req);
+        sendJson(res, 200, await yazio.removeEntry(req.user.id, id));
+    }],
+
     // das Bild kommt als rohe Bytes, der Typ wird an den ersten Bytes geprüft (recipes.js)
     ["POST", /^\/api\/recipes\/(\d+)\/image$/, async (req, res, id) => {
         const body = await readImageBody(req, recipes.MAX_IMAGE_BYTES);

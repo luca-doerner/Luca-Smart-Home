@@ -8,8 +8,12 @@
  *
  * Gespeichert wird immer das ganze Rezept (POST /api/recipes/:id) — der Server ersetzt Zutaten
  * und Schritte komplett, also muss die Seite auch alles mitschicken.
+ *
+ * Nährwerte stehen pro Portion im Rezept (kcal, Eiweiß, Kohlenhydrate, Fett). Der Knopf „Portion
+ * nach YAZIO“ schickt nur die Zahl der Portionen; mal Portionen rechnet der Server (yazio.js).
  */
 import { api, breadcrumb, cardGrid, el, errorBox, icon, plural, showPage, throttle } from "./lib.js";
+import { mealSelect, nutrientLine, todayLocal } from "./nutrition.js";
 
 const DIFFICULTIES = ["einfach", "mittel", "schwer"];
 const MAX_IMAGE_SIDE = 1600;   // größere Bilder werden im Browser verkleinert
@@ -324,12 +328,30 @@ function imageBox(recipe, errors, onChanged) {
 }
 
 /*************** Rezept bearbeiten ************************************************************/
+const NUTRIENT_FIELDS = [
+    { key: "kcal", id: "recipe-kcal", label: "Kalorien (kcal)", step: 1 },
+    { key: "protein", id: "recipe-protein", label: "Eiweiß (g)", step: 0.1 },
+    { key: "carbs", id: "recipe-carbs", label: "Kohlenhydrate (g)", step: 0.1 },
+    { key: "fat", id: "recipe-fat", label: "Fett (g)", step: 0.1 },
+];
+
+// null, wenn alle leer sind (löscht die Nährwerte); sonst alle vier. Immer mitgeschickt, damit die
+// Seite zeigt und speichert, was im Formular steht — nur ein anderer Aufrufer (KI) lässt sie weg.
+function readNutrients(fields) {
+    const values = fields.map((field) => field.read());
+    if (values.every((value) => value === null))
+        return null;
+    if (values.some((value) => value === null))
+        throw new Error("Nährwerte: entweder alle vier Felder ausfüllen oder alle leer lassen");
+    return Object.fromEntries(fields.map((field, index) => [field.key, values[index]]));
+}
+
 // recipe: ein vorhandenes Rezept oder null für ein neues
 async function recipeForm(recipe, errors) {
     const isNew = recipe === null;
     const start = recipe ?? {
         name: "", description: null, servings: 4, prep_minutes: null, cook_minutes: null,
-        difficulty: null, tags: [], source: null, notes: null, ingredients: [], steps: [],
+        difficulty: null, tags: [], source: null, notes: null, nutrients: null, ingredients: [], steps: [],
     };
     const names = await ingredientList();
     const datalistId = "zutaten-vorschlaege";
@@ -350,10 +372,13 @@ async function recipeForm(recipe, errors) {
     const tags = textInput("recipe-tags", start.tags.join(", "), { maxlength: 500, placeholder: "Hauptgericht, vegetarisch" });
     const source = textInput("recipe-source", start.source, { maxlength: 500 });
     const notes = areaInput("recipe-notes", start.notes, 3);
+    // die vier Felder gehören zusammen: alle leer = keine Nährwerte, sonst müssen alle da sein
+    const nutrients = NUTRIENT_FIELDS.map(({ key, id, step }) =>
+        ({ key, id, ...numberInput(id, start.nutrients?.[key], { min: 0, max: 100000, step })}));
 
     const ingredients = ingredientRows(start.ingredients, datalistId, touched);
     const steps = stepRows(start.steps, touched);
-    for (const control of [name, description, servings, prep, cook, tags, source, notes])
+    for (const control of [name, description, servings, prep, cook, tags, source, notes, ...nutrients])
         control.input.addEventListener("input", touched);
     difficulty.addEventListener("change", touched);
 
@@ -375,6 +400,12 @@ async function recipeForm(recipe, errors) {
         ingredients.node,
         el("h4", {}, "Schritte"),
         steps.node,
+        el("h4", {}, "Nährwerte pro Portion"),
+        el("p", { class: "muted form-description" },
+            "Für YAZIO. Entweder alle vier Felder oder keins. Die Werte gelten für eine Portion, "
+            + "nicht für das ganze Rezept — ändert sich die Portionszahl oben, bleiben sie richtig."),
+        el("div", { class: "form-row" }, NUTRIENT_FIELDS.map(({ id, label }, index) =>
+            field(id, label, nutrients[index].node))),
         el("h4", {}, "Mehr"),
         field("recipe-source", "Quelle", source.node),
         field("recipe-notes", "Notizen", notes.node),
@@ -390,6 +421,7 @@ async function recipeForm(recipe, errors) {
         tags: tags.read()?.split(",").map((tag) => tag.trim()).filter(Boolean) ?? [],
         source: source.read(),
         notes: notes.read(),
+        nutrients: readNutrients(nutrients),
         ingredients: ingredients.read(),
         steps: steps.read(),
     });
@@ -615,11 +647,59 @@ function recipeMeta(recipe) {
     ].filter(Boolean).join(" · "));
 }
 
+// „Portion nach YAZIO“: schreibt in das echte Tagebuch, deshalb nur auf ausdrücklichen Klick. Die
+// Karte gibt es nur bei verbundenem Konto; ohne Nährwerte erklärt sie, was fehlt, statt zu fehlen.
+function yazioBox(recipe, errors) {
+    if (!recipe.nutrients)
+        return el("section", { class: "card" },
+            el("h3", {}, "YAZIO"),
+            el("p", { class: "muted" }, "Für dieses Rezept fehlen die Nährwerte pro Portion. Trag sie beim ",
+                el("a", { href: `/recipes/${recipe.id}?edit=1` }, "Bearbeiten"), " ein, dann kannst du eine Portion hier ins Tagebuch schicken."));
+
+    const portions = el("input", { type: "number", id: "yazio-portions", value: 1, min: 0.5, max: 50, step: 0.5, required: true });
+    const meal = mealSelect("yazio-meal");
+    const date = el("input", { type: "date", id: "yazio-date", value: todayLocal(), required: true });
+    const status = el("p", { class: "muted hint", role: "status" });
+    const button = el("button", { type: "submit", class: "button primary" }, icon("food"), "Portion nach YAZIO");
+    const form = el("form", {},
+        el("div", { class: "form-row" },
+            el("div", { class: "form-field" }, el("label", { for: "yazio-portions" }, "Portionen"), portions),
+            el("div", { class: "form-field" }, el("label", { for: "yazio-meal" }, "Mahlzeit"), meal),
+            el("div", { class: "form-field" }, el("label", { for: "yazio-date" }, "Tag"), date)),
+        el("div", { class: "form-actions" }, button),
+        status);
+
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!form.reportValidity())
+            return;
+        button.disabled = true;
+        status.replaceChildren();
+        try {
+            const entry = await api(`/api/recipes/${recipe.id}/yazio`,
+                { portions: Number(portions.value), daytime: meal.value, date: date.value });
+            errors.show("yazio", "");
+            status.replaceChildren(`Eingetragen: ${entry.name} — ${nutrientLine(entry)}. `,
+                el("a", { href: `/nutrition?date=${entry.date}` }, "Tag ansehen"));
+        } catch (err) {
+            errors.show("yazio", `Nach YAZIO senden fehlgeschlagen: ${err.message}`);
+        } finally {
+            button.disabled = false;
+        }
+    });
+
+    return el("section", { class: "card" },
+        el("h3", {}, "YAZIO"),
+        form);
+}
+
 export async function renderRecipePage(id) {
     const errors = errorBox();
     const { recipe } = await api(`/api/recipes/${id}`);
     document.title = `${recipe.name} · Smart Home`;
     const shopping = shoppingListBox(recipe, errors);
+    // YAZIO darf fehlen oder spinnen: die Seite zeigt dann einfach keine Karte
+    const yazio = await api("/api/yazio").catch(() => ({ connected: false }));
 
     showPage(
         breadcrumb([{ label: "Rezepte", href: "/recipes" }, { label: recipe.name }]),
@@ -628,6 +708,7 @@ export async function renderRecipePage(id) {
                 el("h1", {}, recipe.name),
                 recipe.description ? el("p", { class: "muted" }, recipe.description) : null,
                 recipeMeta(recipe),
+                recipe.nutrients ? el("p", { class: "muted" }, `Pro Portion: ${nutrientLine(recipe.nutrients)}`) : null,
                 recipe.tags.length > 0
                     ? el("p", { class: "tag-row" }, recipe.tags.map((tag) =>
                         el("a", { class: "badge", href: `/recipes?tag=${encodeURIComponent(tag)}` }, tag)))
@@ -642,6 +723,7 @@ export async function renderRecipePage(id) {
             : null,
         servingsCalculator(recipe, errors),
         shopping.node,
+        yazio.connected ? yazioBox(recipe, errors) : null,
         recipe.steps.length === 0 ? null : el("section", { class: "card" },
             el("h3", {}, "Zubereitung"),
             el("ol", { class: "step-list" }, recipe.steps.map((step) => el("li", {},

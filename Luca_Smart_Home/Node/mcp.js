@@ -33,10 +33,15 @@
 const recipes = require("./recipes");
 const pantry = require("./pantry");
 const bring = require("./bring");
+const yazio = require("./yazio");
 const HttpError = require("./http-error");
 const { log } = require("./log");
 
-const SERVER_INFO = { name: "luca-smart-home-rezepte", version: "1.0.0" };
+const SERVER_INFO = {
+    name: "luca-smart-home-rezepte",
+    title: "Lucas Smart Home — Rezepte, Bring! und YAZIO",
+    version: "1.1.0",
+};
 
 // neueste Fassung zuerst; Datumsstrings lassen sich direkt vergleichen ("2026-07-28" > "2025-11-25")
 const MODERN_VERSION = "2026-07-28";
@@ -49,7 +54,12 @@ const INSTRUCTIONS = "Rezepte, Zutaten und Vorrat aus Lucas Smart Home. Typische
     + "search_recipes, dann get_recipe, dann plan_shopping_list, nach dem Ja des Benutzers "
     + "bring_add_items. Die Einträge in from_pantry einer Einkaufsliste gehören nicht auf die "
     + "Liste, müssen dem Benutzer aber genannt werden. Steht in choices eine Alternative "
-    + "(„A oder B“), frag den Benutzer, welche er will, und trag nur diese ein.";
+    + "(„A oder B“), frag den Benutzer, welche er will, und trag nur diese ein.\n\n"
+    + "Dazu das Ernährungstagebuch YAZIO (yazio_*): lesen darfst du frei, aber alles, was "
+    + "ins Tagebuch SCHREIBT oder daraus löscht (yazio_add_product, yazio_log_recipe, "
+    + "yazio_remove_entry), nur nach dem ausdrücklichen Ja des Benutzers. Nährwerte eines "
+    + "Rezepts stehen pro Portion im Rezept (nutrients); fehlen sie, mit set_recipe_nutrients "
+    + "ausrechnen und vorher dem Benutzer zeigen.";
 
 /* JSON-RPC- und MCP-Fehlercodes (MCP legt -32020 und -32022 fest) */
 const INVALID_REQUEST = -32600;
@@ -79,6 +89,19 @@ const ALTERNATIVES_HINT = "Zutaten mit demselben alternative_group sind Alternat
 
 const SERVINGS = integer("Für wie viele Portionen gerechnet werden soll. Weglassen = die "
     + "Portionszahl, die im Rezept steht.", { minimum: 1, maximum: 100 });
+
+const DATE = text("Der Tag als JJJJ-MM-TT, z. B. 2026-03-14. Weglassen = heute.",
+    { pattern: "^\\d{4}-\\d{2}-\\d{2}$" });
+
+const DAYTIME = text("Die Mahlzeit: breakfast (Frühstück), lunch (Mittag), dinner (Abend) oder snack.",
+    { enum: yazio.DAYTIMES });
+
+const NUTRIENTS_SCHEMA = object({
+    kcal: number("Kilokalorien pro Portion."),
+    protein: number("Eiweiß in Gramm pro Portion."),
+    carbs: number("Kohlenhydrate in Gramm pro Portion."),
+    fat: number("Fett in Gramm pro Portion."),
+}, ["kcal", "protein", "carbs", "fat"]);
 
 const INGREDIENT_SCHEMA = object({
     name: text("Name der Zutat, z. B. „Hackfleisch“. Unbekannte Namen werden im Katalog angelegt. "
@@ -111,6 +134,11 @@ const RECIPE_SCHEMA = object({
     tags: list(text("Ein Tag, z. B. „Hauptgericht“ oder „vegetarisch“."), "Tags zum Filtern."),
     source: text("Woher das Rezept kommt, z. B. ein Link."),
     notes: text("Freie Notizen, z. B. ein Tipp."),
+    nutrients: {
+        ...NUTRIENTS_SCHEMA,
+        description: "Nährwerte PRO PORTION (für YAZIO). Weglassen = unverändert lassen; beim "
+            + "Ändern eines Rezepts muss man sie also nicht mitschicken.",
+    },
     ingredients: list(INGREDIENT_SCHEMA, "Die Zutaten in ihrer Reihenfolge."),
     steps: list(STEP_SCHEMA, "Die Arbeitsschritte in ihrer Reihenfolge."),
 }, ["name"]);
@@ -284,6 +312,117 @@ const TOOLS = [
             list: BRING_LIST,
         }, ["items"]),
         run: ({ items, list: target }, user) => bring.addItems(user.id, items, target),
+    },
+    {
+        name: "set_recipe_nutrients",
+        title: "Nährwerte eines Rezepts setzen",
+        description: "Setzt die Nährwerte PRO PORTION eines Rezepts (kcal, Eiweiß, Kohlenhydrate, "
+            + "Fett in Gramm), ohne Zutaten und Schritte anzufassen. Damit trägt yazio_log_recipe "
+            + "das Rezept ins Tagebuch ein.\n\n"
+            + "So rechnest du sie aus: für jede Zutat mit yazio_search_products das passende "
+            + "Produkt suchen (per_100 gilt je 100 g bzw. ml), die Menge aus dem Rezept in Gramm "
+            + "umrechnen (EL, TL und Stück schätzen und sagen, dass du geschätzt hast), alles "
+            + "addieren und durch die Portionszahl des Rezepts (servings) teilen. Zutaten ohne "
+            + "Menge („etwas Öl“) nicht vergessen, aber grob ansetzen; bei Alternativen "
+            + "(alternative_group) die nehmen, die der Benutzer kocht.\n\n"
+            + "Zeig dem Benutzer die Werte und kurz, woraus sie entstanden, BEVOR du sie "
+            + "speicherst: es sind Schätzungen, und sie landen später in seinem Tagebuch.",
+        inputSchema: object({
+            id: integer("Die id des Rezepts."),
+            nutrients: { ...NUTRIENTS_SCHEMA, description: "Nährwerte pro Portion." },
+        }, ["id", "nutrients"]),
+        run: async ({ id, nutrients }) => ({ recipe: await recipes.setNutrients(id, nutrients) }),
+    },
+    {
+        name: "yazio_day",
+        title: "YAZIO: Tag lesen",
+        description: "Das Ernährungstagebuch eines Tages aus YAZIO: Summe und Ziele (kcal, Eiweiß, "
+            + "Kohlenhydrate, Fett, Wasser in ml, Schritte) und die Einträge nach Mahlzeit. Jeder "
+            + "Eintrag hat eine id; die braucht yazio_remove_entry. Ist noch kein Konto verbunden, "
+            + "sagt der Fehler, dass sich der Benutzer auf der Seite „Konto“ bei YAZIO anmelden muss.",
+        inputSchema: object({ date: DATE }),
+        run: ({ date }, user) => yazio.day(user.id, date),
+    },
+    {
+        name: "yazio_goals",
+        title: "YAZIO: Ziele lesen",
+        description: "Die Tagesziele des Benutzers in YAZIO: kcal, Eiweiß, Kohlenhydrate, Fett, "
+            + "Wasser (ml), Schritte und das Zielgewicht (kg).",
+        inputSchema: object({ date: DATE }),
+        run: ({ date }, user) => yazio.goals(user.id, date),
+    },
+    {
+        name: "yazio_weight",
+        title: "YAZIO: Gewicht lesen",
+        description: "Das letzte in YAZIO eingetragene Gewicht (kg) am oder vor dem Tag; "
+            + "weight_kg ist null, wenn noch keins eingetragen ist. Nur lesen — Gewicht "
+            + "eintragen kann dieser Server nicht.",
+        inputSchema: object({ date: DATE }),
+        run: ({ date }, user) => yazio.weight(user.id, date),
+    },
+    {
+        name: "yazio_search_products",
+        title: "YAZIO: Produkt suchen",
+        description: "Sucht Lebensmittel in der YAZIO-Datenbank. Jeder Treffer hat product_id und "
+            + "per_100 (kcal, Eiweiß, Kohlenhydrate, Fett je 100 g bzw. ml) und die Portion, die "
+            + "YAZIO vorschlägt. Die Werte kommen unverändert von YAZIO; wirken sie unplausibel "
+            + "(mehr als 900 kcal je 100 g), nimm nicht still einen davon, sondern sag es.",
+        inputSchema: object({ query: text("Suchbegriff, z. B. „Haferflocken“ oder „Skyr natur“.") }, ["query"]),
+        run: async ({ query }, user) => ({ products: await yazio.searchProducts(user.id, query) }),
+    },
+    {
+        name: "yazio_get_product",
+        title: "YAZIO: Produkt lesen",
+        description: "Ein Produkt aus YAZIO mit per_100 (je 100 g bzw. ml) und den Portionsgrößen "
+            + "(servings, z. B. „1 Scheibe“ = 30 g).",
+        inputSchema: object({ product_id: text("Die product_id aus yazio_search_products.") }, ["product_id"]),
+        run: ({ product_id: id }, user) => yazio.product(user.id, id),
+    },
+    {
+        name: "yazio_add_product",
+        title: "YAZIO: Produkt eintragen",
+        description: "Trägt ein Produkt aus YAZIO ins Tagebuch des Benutzers ein. Das SCHREIBT in "
+            + "sein echtes Tagebuch: sag dem Benutzer vorher, was du eintragen willst (Produkt, "
+            + "Menge, Mahlzeit, Tag), und tu es erst nach seinem Ja. Die Antwort nennt die id des "
+            + "Eintrags und die Nährwerte; nenne sie dem Benutzer.",
+        inputSchema: object({
+            product_id: text("Die product_id aus yazio_search_products."),
+            amount: number("Menge in Gramm bzw. Millilitern (nicht in Portionen: eine Portion von "
+                + "30 g sind amount 30)."),
+            daytime: DAYTIME,
+            date: DATE,
+            serving: text("Nur wenn der Benutzer in Portionen gedacht hat: Name der Portion, wie in "
+                + "den servings des Produkts, z. B. „Scheibe“. Zusammen mit serving_quantity."),
+            serving_quantity: number("Wie viele dieser Portionen (amount bleibt trotzdem die Summe in Gramm)."),
+        }, ["product_id", "amount", "daytime"]),
+        run: (args, user) => yazio.addProduct(user.id, args),
+    },
+    {
+        name: "yazio_log_recipe",
+        title: "YAZIO: Rezept eintragen",
+        description: "Trägt eine oder mehrere Portionen eines Rezepts als freien Eintrag ins "
+            + "YAZIO-Tagebuch ein. Die Nährwerte stehen pro Portion im Rezept (nutrients); der "
+            + "Server rechnet mal portions. Hat das Rezept keine, kommt ein Fehler: dann erst "
+            + "set_recipe_nutrients.\n\n"
+            + "Das SCHREIBT in das echte Tagebuch des Benutzers: nenne vorher Rezept, Portionen, "
+            + "Mahlzeit und Tag und tu es erst nach seinem Ja.",
+        inputSchema: object({
+            recipe_id: integer("Die id des Rezepts aus search_recipes."),
+            portions: number("Wie viele Portionen gegessen wurden, auch 0,5 oder 1,5."),
+            daytime: DAYTIME,
+            date: DATE,
+        }, ["recipe_id", "portions", "daytime"]),
+        run: ({ recipe_id: id, portions, daytime, date }, user) => yazio.logRecipe(user.id, id, portions, daytime, date),
+    },
+    {
+        name: "yazio_remove_entry",
+        title: "YAZIO: Eintrag löschen",
+        description: "Löscht einen Eintrag aus dem YAZIO-Tagebuch. entry_id ist die id des EINTRAGS "
+            + "aus yazio_day (oder der Antwort von yazio_add_product / yazio_log_recipe), nicht "
+            + "die product_id. Das lässt sich nicht zurücknehmen: zuerst dem Benutzer sagen, "
+            + "welchen Eintrag (Name, Mahlzeit), und erst nach seinem Ja löschen.",
+        inputSchema: object({ entry_id: text("Die id des Eintrags aus yazio_day.") }, ["entry_id"]),
+        run: ({ entry_id: id }, user) => yazio.removeEntry(user.id, id),
     },
 ];
 

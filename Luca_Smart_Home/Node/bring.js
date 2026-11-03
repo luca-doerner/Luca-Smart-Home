@@ -17,22 +17,20 @@
  * Was gespeichert wird: nicht das Passwort. Es wird nur für die Anmeldung gebraucht und danach
  * weggeworfen; behalten wird der refresh_token von Bring!, mit dem sich neue Zugriffstoken holen
  * lassen. Er liegt verschlüsselt in der Datenbank (AES-256-GCM). Der Schlüssel steht nicht in der
- * Datenbank, sondern in SECRET_KEY (Umgebung, 32 Byte als Hex oder Base64) oder, wenn der fehlt,
- * in der Datei SECRET_KEY_FILE (Standard /var/lib/luca-smart-home/secret.key, wird beim ersten
- * Gebrauch angelegt, Modus 0600). Geht der Schlüssel verloren, müssen sich alle neu bei Bring!
- * anmelden — mehr passiert nicht.
+ * Datenbank, sondern in SECRET_KEY oder der Datei SECRET_KEY_FILE (siehe secret.js, dort steht
+ * auch das Format). Geht der Schlüssel verloren, müssen sich alle neu bei Bring! anmelden — mehr
+ * passiert nicht.
  *
  * Das Zugriffstoken (kurzlebig) liegt nur im Speicher. Passwörter und Token dürfen nirgends
  * hin, wo log() sie hinschreiben könnte: log() schreibt ins Journal und an jede offene Seite.
  * Fehlermeldungen von hier enthalten deshalb nie den Antwortkörper von Bring!.
  */
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
 const db = require("./db");
 const auth = require("./auth");
 const HttpError = require("./http-error");
 const recipes = require("./recipes");
+const { encrypt, decrypt } = require("./secret");
 const { log } = require("./log");
 
 // BRING_API_URL gibt es nur zum Testen gegen einen Attrappen-Server, im Betrieb bleibt es leer
@@ -54,60 +52,6 @@ const BASE_HEADERS = {
 
 const NOT_CONNECTED = "Bring! ist nicht verbunden — unter „Konto“ bei Bring! anmelden";
 const EXPIRED = "Die Bring!-Anmeldung ist abgelaufen — unter „Konto“ neu bei Bring! anmelden";
-
-/*************** Verschlüsselung **************************************************************/
-let cachedKey = null;
-
-function secretKey() {
-    if (cachedKey)
-        return cachedKey;
-    const fromEnv = process.env.SECRET_KEY;
-    if (fromEnv) {
-        const key = /^[0-9a-f]{64}$/i.test(fromEnv) ? Buffer.from(fromEnv, "hex") : Buffer.from(fromEnv, "base64");
-        if (key.length !== 32)
-            throw new Error("SECRET_KEY muss 32 Byte lang sein (64 Hex-Zeichen)");
-        return (cachedKey = key);
-    }
-    const file = process.env.SECRET_KEY_FILE || "/var/lib/luca-smart-home/secret.key";
-    try {
-        cachedKey = Buffer.from(fs.readFileSync(file, "utf8").trim(), "hex");
-    } catch (err) {
-        if (err.code !== "ENOENT")
-            throw err;
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        // "wx": legt nur an, überschreibt nie — zwei gleichzeitige Starts haben so denselben Schlüssel
-        try {
-            fs.writeFileSync(file, crypto.randomBytes(32).toString("hex") + "\n", { mode: 0o600, flag: "wx" });
-        } catch (writeErr) {
-            if (writeErr.code !== "EEXIST")
-                throw writeErr;
-        }
-        cachedKey = Buffer.from(fs.readFileSync(file, "utf8").trim(), "hex");
-        log("Bring!: neuen Schlüssel angelegt (SECRET_KEY_FILE)");
-    }
-    if (cachedKey.length !== 32)
-        throw new Error("Der Schlüssel in SECRET_KEY_FILE ist nicht 32 Byte lang");
-    return cachedKey;
-}
-
-function encrypt(value) {
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv("aes-256-gcm", secretKey(), iv);
-    const data = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
-    return [iv, cipher.getAuthTag(), data].map((part) => part.toString("base64url")).join(".");
-}
-
-// null, wenn sich nichts entschlüsseln lässt (falscher Schlüssel, beschädigter Wert)
-function decrypt(stored) {
-    try {
-        const [iv, tag, data] = stored.split(".").map((part) => Buffer.from(part, "base64url"));
-        const decipher = crypto.createDecipheriv("aes-256-gcm", secretKey(), iv);
-        decipher.setAuthTag(tag);
-        return JSON.parse(Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8"));
-    } catch {
-        return null;
-    }
-}
 
 /*************** Anfragen an Bring! ***********************************************************/
 async function rawRequest(method, requestPath, { headers = {}, form, json } = {}) {

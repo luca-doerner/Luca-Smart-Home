@@ -106,6 +106,33 @@ function parseServings(value) {
     return servings;
 }
 
+// Nährwerte pro Portion: { kcal, protein, carbs, fat } (kcal und Gramm). Drei Zustände, die
+// getrennt bleiben müssen: undefined = nicht mitgeschickt (beim Ändern bleibt der alte Wert, sonst
+// müsste jede Änderung eines Rezepts die Nährwerte mitschicken), null = löschen, Objekt = setzen.
+const NUTRIENT_KEYS = ["kcal", "protein", "carbs", "fat"];
+const MAX_NUTRIENT = 100000;
+
+function normalizeNutrients(value) {
+    if (value === undefined || value === null)
+        return value;
+    if (typeof value !== "object" || Array.isArray(value))
+        fail("Nährwerte müssen ein Objekt mit kcal, protein, carbs und fat sein");
+    const unknown = Object.keys(value).filter((key) => !NUTRIENT_KEYS.includes(key));
+    if (unknown.length > 0)
+        fail(`Unbekannter Nährwert „${unknown[0]}“. Erlaubt: ${NUTRIENT_KEYS.join(", ")}`);
+    const nutrients = {};
+    for (const key of NUTRIENT_KEYS) {
+        const raw = value[key];
+        const number = typeof raw === "string" && raw.trim() !== "" ? Number(raw.replace(",", ".")) : raw;
+        if (typeof number !== "number" || !Number.isFinite(number))
+            fail(`Nährwert ${key} fehlt oder ist keine Zahl (pro Portion, kcal bzw. Gramm)`);
+        if (number < 0 || number > MAX_NUTRIENT)
+            fail(`Nährwert ${key} muss zwischen 0 und ${MAX_NUTRIENT} liegen`);
+        nutrients[key] = Number(number.toFixed(1));
+    }
+    return nutrients;
+}
+
 // Tags ohne Doppelte; "Nudeln" und "nudeln" sind dasselbe Tag, die erste Schreibweise gewinnt
 function normalizeTags(value) {
     if (value === undefined || value === null)
@@ -263,6 +290,7 @@ function normalizeRecipe(input) {
         tags: normalizeTags(input.tags),
         source: optionalText(input.source, "Quelle", 500),
         notes: optionalText(input.notes, "Notizen"),
+        nutrients: normalizeNutrients(input.nutrients),
         ingredients,
         steps: normalizeList(input.steps, "Schritte", MAX_STEPS, normalizeStep),
     };
@@ -339,7 +367,7 @@ async function listTags() {
 /*************** Lesen ***********************************************************************/
 const RECIPE_COLUMNS = `
     id, name, description, servings, prep_minutes, cook_minutes, difficulty, tags, source, notes,
-    image_mime IS NOT NULL AS has_image, image_updated_at, created_at, updated_at`;
+    nutrients, image_mime IS NOT NULL AS has_image, image_updated_at, created_at, updated_at`;
 
 // ein Rezept vollständig: { id, name, ..., ingredients: [...], steps: [...] }
 async function getRecipe(id) {
@@ -432,6 +460,9 @@ async function listRecipes({ q, tag, tags, limit } = {}) {
 // Reihenfolge ist Ersetzen das einzige, was vorhersagbar ist.
 async function saveRecipe(id, input, userId = null) {
     const recipe = normalizeRecipe(input);
+    // null (löschen) und undefined (nicht mitgeschickt) werden beide zu SQL-NULL; welcher der beiden
+    // es war, steht in recipe.nutrients !== undefined
+    const nutrientsJson = recipe.nutrients ? JSON.stringify(recipe.nutrients) : null;
     const client = await db.connect();
     let recipeId = id;
     try {
@@ -443,15 +474,18 @@ async function saveRecipe(id, input, userId = null) {
         if (id === null) {
             const { rows: [created] } = await client.query(`
                 INSERT INTO recipes (name, description, servings, prep_minutes, cook_minutes,
-                                     difficulty, tags, source, notes, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`, [...values, userId]);
+                                     difficulty, tags, source, notes, created_by, nutrients)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb) RETURNING id`,
+                [...values, userId, nutrientsJson]);
             recipeId = created.id;
         } else {
+            // $11 sagt, ob die Nährwerte überhaupt mitgeschickt wurden; sonst bleibt der alte Wert
             const { rows: [updated] } = await client.query(`
                 UPDATE recipes SET name = $2, description = $3, servings = $4, prep_minutes = $5,
                     cook_minutes = $6, difficulty = $7, tags = $8, source = $9, notes = $10,
+                    nutrients = CASE WHEN $11::boolean THEN $12::jsonb ELSE nutrients END,
                     updated_at = now()
-                WHERE id = $1 RETURNING id`, [id, ...values]);
+                WHERE id = $1 RETURNING id`, [id, ...values, recipe.nutrients !== undefined, nutrientsJson]);
             if (!updated)
                 throw new HttpError(404, "Rezept nicht gefunden");
         }
@@ -505,6 +539,21 @@ async function saveRecipe(id, input, userId = null) {
         client.release();
     }
     return getRecipe(recipeId);
+}
+
+// Nur die Nährwerte pro Portion setzen (oder mit null löschen), ohne das Rezept anzufassen: ein
+// Agent rechnet sie oft erst nach dem Anlegen aus und müsste sonst alle Zutaten und Schritte
+// noch einmal schicken (Speichern ersetzt ja die ganze Liste).
+async function setNutrients(id, input) {
+    const nutrients = normalizeNutrients(input);
+    if (nutrients === undefined)
+        fail("nutrients fehlt (null löscht die Nährwerte)");
+    const { rows: [recipe] } = await db.query(`
+        UPDATE recipes SET nutrients = $2::jsonb, updated_at = now() WHERE id = $1
+        RETURNING id, name, servings, nutrients`, [id, nutrients && JSON.stringify(nutrients)]);
+    if (!recipe)
+        throw new HttpError(404, "Rezept nicht gefunden");
+    return recipe;
 }
 
 async function deleteRecipe(id) {
@@ -863,7 +912,7 @@ async function deleteImage(id, { quiet = false } = {}) {
 
 module.exports = {
     MAX_IMAGE_BYTES, DIFFICULTIES,
-    listRecipes, getRecipe, saveRecipe, deleteRecipe,
+    listRecipes, getRecipe, saveRecipe, setNutrients, deleteRecipe,
     getRecipeIngredients, getShoppingList, planShoppingList,
     listIngredients, createIngredient, findIngredient, listTags,
     saveImage, readImage, deleteImage,
