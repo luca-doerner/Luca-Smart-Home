@@ -160,8 +160,8 @@ const TOOLS = [
                 + "Groß- und Kleinschreibung ist egal; list_tags zeigt, welche es gibt."),
             limit: integer("Höchstens so viele Treffer (1–50).", { minimum: 1, maximum: 50 }),
         }),
-        run: async ({ query, tags, limit }) => ({
-            recipes: await recipes.listRecipes({ q: query, tags, limit }),
+        run: async ({ query, tags, limit }, user) => ({
+            recipes: await recipes.listRecipes(user.id, { q: query, tags, limit }),
         }),
     },
     {
@@ -170,7 +170,7 @@ const TOOLS = [
         description: "Ein Rezept vollständig: Zutaten mit Mengen und Gruppen, Schritte, Tags, Zeiten. "
             + ALTERNATIVES_HINT,
         inputSchema: object({ id: integer("Die id aus search_recipes.") }, ["id"]),
-        run: async ({ id }) => ({ recipe: await recipes.getRecipe(id) }),
+        run: async ({ id }, user) => ({ recipe: await recipes.getRecipe(user.id, id) }),
     },
     {
         name: "get_recipe_ingredients",
@@ -178,7 +178,7 @@ const TOOLS = [
         description: "Nur die Zutaten eines Rezepts, auf Wunsch auf andere Portionen gerechnet. "
             + "Zutaten ohne Menge bleiben unverändert. " + ALTERNATIVES_HINT,
         inputSchema: object({ id: integer("Die id des Rezepts."), servings: SERVINGS }, ["id"]),
-        run: ({ id, servings }) => recipes.getRecipeIngredients(id, servings),
+        run: ({ id, servings }, user) => recipes.getRecipeIngredients(user.id, id, servings),
     },
     {
         name: "plan_shopping_list",
@@ -202,7 +202,7 @@ const TOOLS = [
             recipe_ids: list(integer("Die id eines Rezepts."), "Ein bis zwanzig Rezepte."),
             servings: SERVINGS,
         }, ["recipe_ids"]),
-        run: ({ recipe_ids: ids, servings }) => recipes.planShoppingList(ids, servings),
+        run: ({ recipe_ids: ids, servings }, user) => recipes.planShoppingList(user.id, ids, servings),
     },
     {
         name: "create_recipe",
@@ -212,7 +212,7 @@ const TOOLS = [
             + "Steht im Rezept „A oder B“, werden A und B zwei Zutaten mit demselben "
             + "alternative_group (z. B. „Schärfe“) — nicht B in den Hinweis von A schreiben.",
         inputSchema: object({ recipe: RECIPE_SCHEMA }, ["recipe"]),
-        run: async ({ recipe }, user) => ({ recipe: await recipes.saveRecipe(null, recipe, user.id) }),
+        run: async ({ recipe }, user) => ({ recipe: await recipes.saveRecipe(user.id, null, recipe) }),
     },
     {
         name: "update_recipe",
@@ -220,7 +220,7 @@ const TOOLS = [
         description: "Ersetzt ein Rezept. Achtung: Zutaten und Schritte werden komplett ersetzt, "
             + "nicht ergänzt — deshalb vorher get_recipe lesen und die ganze Liste mitschicken.",
         inputSchema: object({ id: integer("Die id des Rezepts."), recipe: RECIPE_SCHEMA }, ["id", "recipe"]),
-        run: async ({ id, recipe }, user) => ({ recipe: await recipes.saveRecipe(id, recipe, user.id) }),
+        run: async ({ id, recipe }, user) => ({ recipe: await recipes.saveRecipe(user.id, id, recipe) }),
     },
     {
         name: "delete_recipe",
@@ -228,7 +228,7 @@ const TOOLS = [
         description: "Löscht ein Rezept samt Zutatenliste, Schritten und Bild. Das lässt sich "
             + "nicht zurücknehmen — vorher beim Benutzer nachfragen.",
         inputSchema: object({ id: integer("Die id des Rezepts.") }, ["id"]),
-        run: ({ id }) => recipes.deleteRecipe(id),
+        run: ({ id }, user) => recipes.deleteRecipe(user.id, id),
     },
     {
         name: "list_pantry",
@@ -236,7 +236,7 @@ const TOOLS = [
         description: "Was zu Hause ist. always_available heißt „ist immer da“ (Salz, Pfeffer, "
             + "Öl), sonst stehen Menge und Einheit dabei.",
         inputSchema: NO_ARGS,
-        run: async () => ({ items: await pantry.listPantry() }),
+        run: async (args, user) => ({ items: await pantry.listPantry(user.id) }),
     },
     {
         name: "set_pantry_item",
@@ -250,14 +250,14 @@ const TOOLS = [
             unit: text("Einheit der Menge, z. B. g."),
             note: text("Notiz, z. B. „im Keller“."),
         }, ["ingredient"]),
-        run: async (args) => ({ item: await pantry.setPantryItem(args) }),
+        run: async (args, user) => ({ item: await pantry.setPantryItem(user.id, args) }),
     },
     {
         name: "remove_pantry_item",
         title: "Vorrat löschen",
         description: "Nimmt eine Zutat aus dem Vorrat. Die Zutat selbst bleibt im Katalog.",
         inputSchema: object({ name: text("Name der Zutat.") }, ["name"]),
-        run: ({ name }) => pantry.removePantryItemByName(name),
+        run: ({ name }, user) => pantry.removePantryItemByName(user.id, name),
     },
     {
         name: "search_ingredients",
@@ -265,7 +265,7 @@ const TOOLS = [
         description: "Zutaten aus dem Katalog, für die Schreibweise und um zu sehen, was schon "
             + "im Vorrat steht (in_pantry).",
         inputSchema: object({ query: text("Teil eines Namens; leer = alle.") }),
-        run: async ({ query }) => ({ ingredients: await recipes.listIngredients(query) }),
+        run: async ({ query }, user) => ({ ingredients: await recipes.listIngredients(user.id, query) }),
     },
     {
         name: "list_tags",
@@ -273,7 +273,7 @@ const TOOLS = [
         description: "Alle Tags mit der Anzahl der Rezepte — die richtige Schreibweise für "
             + "search_recipes.",
         inputSchema: NO_ARGS,
-        run: async () => ({ tags: await recipes.listTags() }),
+        run: async (args, user) => ({ tags: await recipes.listTags(user.id) }),
     },
     {
         name: "bring_lists",
@@ -331,7 +331,7 @@ const TOOLS = [
             id: integer("Die id des Rezepts."),
             nutrients: { ...NUTRIENTS_SCHEMA, description: "Nährwerte pro Portion." },
         }, ["id", "nutrients"]),
-        run: async ({ id, nutrients }) => ({ recipe: await recipes.setNutrients(id, nutrients) }),
+        run: async ({ id, nutrients }, user) => ({ recipe: await recipes.setNutrients(user.id, id, nutrients) }),
     },
     {
         name: "yazio_day",

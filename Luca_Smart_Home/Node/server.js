@@ -160,7 +160,7 @@ function readImageBody(req, limit) {
 // private: das Bild gehört zu einem angemeldeten Benutzer, Cloudflare darf es nicht für andere
 // zwischenspeichern.
 async function sendImage(req, res, id) {
-    const image = await recipes.readImage(id);
+    const image = await recipes.readImage(req.user.id, id);
     const etag = `"${image.updatedAt.getTime().toString(16)}"`;
     const headers = {
         "Content-Type": image.mime,
@@ -262,12 +262,12 @@ const ROUTES = [
     // navigation, rooms and devices
     ["GET", /^\/api\/navigation$/, async (req, res) => sendJson(res, 200, {
         rooms: await smarthome.getTree(),
-        pinned: await smarthome.getPinned(),
+        pinned: await smarthome.getPinned(req.user.id),
     })],
     ["GET", /^\/api\/rooms\/(\d+)$/, async (req, res, id) => sendJson(res, 200, await smarthome.getRoom(Number(id)))],
     // features with running / message, so the page can tell "started" from "really running"
     ["GET", /^\/api\/devices\/(\d+)$/, async (req, res, id) => {
-        const device = await smarthome.getDevice(Number(id));
+        const device = await smarthome.getDevice(Number(id), req.user.id);
         device.features = device.features.map((feature) => {
             const { running, message } = features.state(feature.id);
             return { ...feature, running, message };
@@ -283,7 +283,7 @@ const ROUTES = [
         const { pinned } = await readJson(req);
         if (typeof pinned !== "boolean")
             throw new HttpError(400, "pinned muss true oder false sein");
-        sendJson(res, 200, { pinned: await smarthome.setDevicePinned(Number(id), pinned) });
+        sendJson(res, 200, { pinned: await smarthome.setDevicePinned(req.user.id, Number(id), pinned) });
     }],
 
     // features
@@ -314,7 +314,7 @@ const ROUTES = [
     ["GET", /^\/api\/recipes$/, async (req, res) => {
         const { searchParams } = new URL(req.url, "http://localhost");
         sendJson(res, 200, {
-            recipes: await recipes.listRecipes({
+            recipes: await recipes.listRecipes(req.user.id, {
                 q: searchParams.get("q"),
                 tag: searchParams.get("tag"),
                 limit: searchParams.get("limit"),
@@ -323,26 +323,26 @@ const ROUTES = [
     }],
     ["POST", /^\/api\/recipes$/, async (req, res) => {
         const { recipe } = await readJson(req, MAX_RECIPE_JSON);
-        sendJson(res, 201, { recipe: await recipes.saveRecipe(null, recipe, req.user.id) });
+        sendJson(res, 201, { recipe: await recipes.saveRecipe(req.user.id, null, recipe) });
     }],
     ["GET", /^\/api\/recipes\/(\d+)$/, async (req, res, id) =>
-        sendJson(res, 200, { recipe: await recipes.getRecipe(Number(id)) })],
+        sendJson(res, 200, { recipe: await recipes.getRecipe(req.user.id, Number(id)) })],
     ["POST", /^\/api\/recipes\/(\d+)$/, async (req, res, id) => {
         const { recipe } = await readJson(req, MAX_RECIPE_JSON);
-        sendJson(res, 200, { recipe: await recipes.saveRecipe(Number(id), recipe, req.user.id) });
+        sendJson(res, 200, { recipe: await recipes.saveRecipe(req.user.id, Number(id), recipe) });
     }],
     ["POST", /^\/api\/recipes\/(\d+)\/delete$/, async (req, res, id) => {
         await readJson(req);
-        sendJson(res, 200, await recipes.deleteRecipe(Number(id)));
+        sendJson(res, 200, await recipes.deleteRecipe(req.user.id, Number(id)));
     }],
     // ?servings=6 rechnet die Mengen auf andere Portionen um
     ["GET", /^\/api\/recipes\/(\d+)\/ingredients$/, async (req, res, id) => {
         const { searchParams } = new URL(req.url, "http://localhost");
-        sendJson(res, 200, await recipes.getRecipeIngredients(Number(id), searchParams.get("servings")));
+        sendJson(res, 200, await recipes.getRecipeIngredients(req.user.id, Number(id), searchParams.get("servings")));
     }],
     ["GET", /^\/api\/recipes\/(\d+)\/shopping-list$/, async (req, res, id) => {
         const { searchParams } = new URL(req.url, "http://localhost");
-        sendJson(res, 200, await recipes.getShoppingList(Number(id), searchParams.get("servings")));
+        sendJson(res, 200, await recipes.getShoppingList(req.user.id, Number(id), searchParams.get("servings")));
     }],
     // Knopf „An Bring! senden“: { servings?, list? }. Schreibt in eine geteilte Liste, deshalb
     // nur auf ausdrücklichen Klick; die Vorschau ist /shopping-list
@@ -409,28 +409,28 @@ const ROUTES = [
     // das Bild kommt als rohe Bytes, der Typ wird an den ersten Bytes geprüft (recipes.js)
     ["POST", /^\/api\/recipes\/(\d+)\/image$/, async (req, res, id) => {
         const body = await readImageBody(req, recipes.MAX_IMAGE_BYTES);
-        sendJson(res, 200, await recipes.saveImage(Number(id), body));
+        sendJson(res, 200, await recipes.saveImage(req.user.id, Number(id), body));
     }],
     ["GET", /^\/api\/recipes\/(\d+)\/image$/, (req, res, id) => sendImage(req, res, Number(id))],
     ["POST", /^\/api\/recipes\/(\d+)\/image\/delete$/, async (req, res, id) => {
         await readJson(req);
-        sendJson(res, 200, await recipes.deleteImage(Number(id)));
+        sendJson(res, 200, await recipes.deleteImage(req.user.id, Number(id)));
     }],
 
     ["GET", /^\/api\/ingredients$/, async (req, res) => {
         const { searchParams } = new URL(req.url, "http://localhost");
-        sendJson(res, 200, { ingredients: await recipes.listIngredients(searchParams.get("q")) });
+        sendJson(res, 200, { ingredients: await recipes.listIngredients(req.user.id, searchParams.get("q")) });
     }],
     ["POST", /^\/api\/ingredients$/, async (req, res) =>
-        sendJson(res, 201, { ingredient: await recipes.createIngredient(await readJson(req)) })],
-    ["GET", /^\/api\/tags$/, async (req, res) => sendJson(res, 200, { tags: await recipes.listTags() })],
+        sendJson(res, 201, { ingredient: await recipes.createIngredient(req.user.id, await readJson(req)) })],
+    ["GET", /^\/api\/tags$/, async (req, res) => sendJson(res, 200, { tags: await recipes.listTags(req.user.id) })],
 
-    ["GET", /^\/api\/pantry$/, async (req, res) => sendJson(res, 200, { items: await pantry.listPantry() })],
+    ["GET", /^\/api\/pantry$/, async (req, res) => sendJson(res, 200, { items: await pantry.listPantry(req.user.id) })],
     ["POST", /^\/api\/pantry$/, async (req, res) =>
-        sendJson(res, 200, { item: await pantry.setPantryItem(await readJson(req)) })],
+        sendJson(res, 200, { item: await pantry.setPantryItem(req.user.id, await readJson(req)) })],
     ["POST", /^\/api\/pantry\/(\d+)\/delete$/, async (req, res, id) => {
         await readJson(req);
-        sendJson(res, 200, await pantry.removePantryItem(Number(id)));
+        sendJson(res, 200, await pantry.removePantryItem(req.user.id, Number(id)));
     }],
 
     /*

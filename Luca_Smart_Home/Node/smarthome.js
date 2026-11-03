@@ -20,27 +20,33 @@ async function getTree() {
     return [...roomNodes.values()];
 }
 
-// pinned devices in the order they were pinned, location: room / parent devices, e.g. "Wohnzimmer / Fernseher"
-async function getPinned() {
+// the devices this user pinned, in the order they were pinned (device_pins: the devices are
+// shared, the pins are per user), location: room / parent devices, e.g. "Wohnzimmer / Fernseher"
+async function getPinned(userId) {
     const { rows } = await db.query(`
         SELECT v.id, v.name, v.type, COALESCE(p.path, r.name) AS location
-        FROM devices_with_room v
+        FROM device_pins pin
+        JOIN devices_with_room v ON v.id = pin.device_id
         JOIN devices d ON d.id = v.id
         LEFT JOIN devices_with_room p ON p.id = v.parent_device_id
         LEFT JOIN rooms r ON r.id = d.room_id
-        WHERE d.pinned_at IS NOT NULL
-        ORDER BY d.pinned_at`);
+        WHERE pin.user_id = $1
+        ORDER BY pin.pinned_at`, [userId]);
     return rows;
 }
 
-async function setDevicePinned(id, pinned) {
-    const { rows: [device] } = await db.query(`
-        UPDATE devices SET pinned_at = CASE WHEN $2 THEN COALESCE(pinned_at, now()) END
-        WHERE id = $1
-        RETURNING pinned_at IS NOT NULL AS pinned`, [id, pinned]);
+// pinning again keeps the old pinned_at (ON CONFLICT DO NOTHING), so the order does not change
+async function setDevicePinned(userId, id, pinned) {
+    const { rows: [device] } = await db.query("SELECT id FROM devices WHERE id = $1", [id]);
     if (!device)
         throw new HttpError(404, "Gerät nicht gefunden");
-    return device.pinned;
+    if (pinned)
+        await db.query(`
+            INSERT INTO device_pins (user_id, device_id) VALUES ($1, $2)
+            ON CONFLICT DO NOTHING`, [userId, id]);
+    else
+        await db.query("DELETE FROM device_pins WHERE user_id = $1 AND device_id = $2", [userId, id]);
+    return pinned;
 }
 
 // the devices directly in a room or directly plugged into a device, with counts for the cards
@@ -63,13 +69,13 @@ async function getRoom(id) {
 }
 
 // device with its path from the room ([room, device, ..., this device]), its parent,
-// its child devices and its features
-async function getDevice(id) {
+// its child devices and its features; pinned is about the user who asks
+async function getDevice(id, userId) {
     const { rows: chain } = await db.query(`
         WITH RECURSIVE up AS (
-            SELECT id, name, type, room_id, parent_device_id, pinned_at, 0 AS depth FROM devices WHERE id = $1
+            SELECT id, name, type, room_id, parent_device_id, 0 AS depth FROM devices WHERE id = $1
             UNION ALL
-            SELECT d.id, d.name, d.type, d.room_id, d.parent_device_id, d.pinned_at, up.depth + 1
+            SELECT d.id, d.name, d.type, d.room_id, d.parent_device_id, up.depth + 1
             FROM devices d JOIN up ON d.id = up.parent_device_id
         )
         SELECT up.*, r.name AS room_name FROM up LEFT JOIN rooms r ON r.id = up.room_id
@@ -85,12 +91,14 @@ async function getDevice(id) {
     ];
     const { rows: features } = await db.query(
         "SELECT id, type, name, kind, exclusive, active FROM features WHERE device_id = $1 ORDER BY id", [id]);
+    const { rowCount: pinned } = await db.query(
+        "SELECT 1 FROM device_pins WHERE user_id = $1 AND device_id = $2", [userId, id]);
 
     return {
         id: device.id,
         name: device.name,
         type: device.type,
-        pinned: device.pinned_at !== null,
+        pinned: pinned > 0,
         settings: await loadSettings("device", id),
         path,
         parent: path[path.length - 2],

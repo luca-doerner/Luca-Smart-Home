@@ -598,7 +598,8 @@ async function logRecipe(userId, recipeId, portions, daytime, date) {
     const meal = parseDaytime(daytime);
     const wanted = parseDate(date);
 
-    const { rows: [recipe] } = await db.query("SELECT name, nutrients FROM recipes WHERE id = $1", [id]);
+    const { rows: [recipe] } = await db.query(
+        "SELECT name, nutrients FROM recipes WHERE id = $1 AND user_id = $2", [id, userId]);
     if (!recipe)
         throw new HttpError(404, "Rezept nicht gefunden");
     if (!recipe.nutrients)

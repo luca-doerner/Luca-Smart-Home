@@ -297,70 +297,72 @@ function normalizeRecipe(input) {
 }
 
 /*************** Zutaten-Katalog **************************************************************/
-// legt die Namen an, die der Katalog noch nicht kennt, und gibt lower(name) -> id zurück.
-// client: damit das Anlegen in derselben Transaktion läuft wie das Rezept.
-async function ingredientIds(client, names) {
+// legt die Namen an, die der Katalog des Benutzers noch nicht kennt, und gibt lower(name) -> id
+// zurück. client: damit das Anlegen in derselben Transaktion läuft wie das Rezept.
+async function ingredientIds(client, userId, names) {
     if (names.length === 0)
         return new Map();
     const lower = names.map((name) => name.toLowerCase());
 
     // DISTINCT ON: zwei Schreibweisen desselben Namens in einer Anfrage würden sonst am
-    // eindeutigen Index ingredients_name_idx scheitern
+    // eindeutigen Index ingredients_user_name_idx scheitern
     await client.query(`
-        INSERT INTO ingredients (name)
-        SELECT d.n FROM (
-            SELECT DISTINCT ON (lower(n)) n FROM unnest($1::text[]) AS n ORDER BY lower(n)
+        INSERT INTO ingredients (user_id, name)
+        SELECT $1, d.n FROM (
+            SELECT DISTINCT ON (lower(n)) n FROM unnest($2::text[]) AS n ORDER BY lower(n)
         ) AS d (n)
-        WHERE NOT EXISTS (SELECT 1 FROM ingredients i WHERE lower(i.name) = lower(d.n))
-        ON CONFLICT (lower(name)) DO NOTHING`, [names]);
+        WHERE NOT EXISTS (SELECT 1 FROM ingredients i WHERE i.user_id = $1 AND lower(i.name) = lower(d.n))
+        ON CONFLICT (user_id, lower(name)) DO NOTHING`, [userId, names]);
 
     const { rows } = await client.query(
-        "SELECT id, name FROM ingredients WHERE lower(name) = ANY($1::text[])", [lower]);
+        "SELECT id, name FROM ingredients WHERE user_id = $1 AND lower(name) = ANY($2::text[])", [userId, lower]);
     return new Map(rows.map((row) => [row.name.toLowerCase(), row.id]));
 }
 
 // Zutaten für die Autovervollständigung; q sucht am Anfang und irgendwo im Namen
-async function listIngredients(q) {
+async function listIngredients(userId, q) {
     const search = (q ?? "").trim();
     const { rows } = await db.query(`
         SELECT i.id, i.name, i.category, i.default_unit,
                EXISTS (SELECT 1 FROM pantry_items p WHERE p.ingredient_id = i.id) AS in_pantry
         FROM ingredients i
-        WHERE $1 = '' OR i.name ILIKE '%' || $1 || '%'
+        WHERE i.user_id = $2 AND ($1 = '' OR i.name ILIKE '%' || $1 || '%')
         ORDER BY (lower(i.name) LIKE lower($1) || '%') DESC, lower(i.name)
-        LIMIT 100`, [search]);
+        LIMIT 100`, [search, userId]);
     return rows;
 }
 
 // eine Zutat anlegen oder, wenn es den Namen schon gibt, die vorhandene ergänzen
-async function createIngredient(input) {
+async function createIngredient(userId, input) {
     const name = requiredText(input?.name, "Name");
     const category = optionalText(input?.category, "Kategorie", MAX_NAME);
     const defaultUnit = optionalText(input?.default_unit, "Einheit", 20);
     const { rows: [ingredient] } = await db.query(`
-        INSERT INTO ingredients (name, category, default_unit) VALUES ($1, $2, $3)
-        ON CONFLICT (lower(name)) DO UPDATE
+        INSERT INTO ingredients (user_id, name, category, default_unit) VALUES ($4, $1, $2, $3)
+        ON CONFLICT (user_id, lower(name)) DO UPDATE
             SET category = COALESCE(EXCLUDED.category, ingredients.category),
                 default_unit = COALESCE(EXCLUDED.default_unit, ingredients.default_unit)
-        RETURNING id, name, category, default_unit`, [name, category, defaultUnit]);
+        RETURNING id, name, category, default_unit`, [name, category, defaultUnit, userId]);
     return ingredient;
 }
 
 // Zutat über ihren Namen, für den Vorrat und die MCP-Werkzeuge
-async function findIngredient(name) {
+async function findIngredient(userId, name) {
     const wanted = requiredText(name, "Zutat");
     const { rows: [ingredient] } = await db.query(
-        "SELECT id, name, category, default_unit FROM ingredients WHERE lower(name) = lower($1)", [wanted]);
+        "SELECT id, name, category, default_unit FROM ingredients WHERE user_id = $2 AND lower(name) = lower($1)",
+        [wanted, userId]);
     return ingredient ?? null;
 }
 
 // alle Tags mit ihrer Anzahl; min(t) ist die Schreibweise, die angezeigt wird
-async function listTags() {
+async function listTags(userId) {
     const { rows } = await db.query(`
         SELECT min(t) AS name, count(*)::int AS count
         FROM recipes, unnest(tags) AS t
+        WHERE user_id = $1
         GROUP BY lower(t)
-        ORDER BY count(*) DESC, lower(min(t))`);
+        ORDER BY count(*) DESC, lower(min(t))`, [userId]);
     return rows;
 }
 
@@ -370,8 +372,12 @@ const RECIPE_COLUMNS = `
     nutrients, image_mime IS NOT NULL AS has_image, image_updated_at, created_at, updated_at`;
 
 // ein Rezept vollständig: { id, name, ..., ingredients: [...], steps: [...] }
-async function getRecipe(id) {
-    const { rows: [recipe] } = await db.query(`SELECT ${RECIPE_COLUMNS} FROM recipes WHERE id = $1`, [id]);
+//
+// Ein Rezept eines anderen Benutzers ist „nicht gefunden“, nicht „verboten“: wer es nicht sehen
+// darf, soll auch nicht erfahren, dass es diese id gibt.
+async function getRecipe(userId, id) {
+    const { rows: [recipe] } = await db.query(
+        `SELECT ${RECIPE_COLUMNS} FROM recipes WHERE id = $1 AND user_id = $2`, [id, userId]);
     if (!recipe)
         throw new HttpError(404, "Rezept nicht gefunden");
 
@@ -389,9 +395,10 @@ async function getRecipe(id) {
 
 // Tags mit der Schreibweise, die in der Datenbank steht: so findet "vegetarisch" auch
 // "Vegetarisch", und die Abfrage kann trotzdem tags && ARRAY[...] mit dem GIN-Index benutzen
-async function matchingTags(tag) {
+async function matchingTags(userId, tag) {
     const { rows } = await db.query(
-        "SELECT DISTINCT t FROM recipes, unnest(tags) AS t WHERE lower(t) = lower($1)", [tag]);
+        "SELECT DISTINCT t FROM recipes, unnest(tags) AS t WHERE user_id = $2 AND lower(t) = lower($1)",
+        [tag, userId]);
     return rows.map((row) => row.t);
 }
 
@@ -409,7 +416,7 @@ const SHORT_COLUMNS = `
 // Mehrere Tags werden mit UND verknüpft („vegetarisch“ und „schnell“), innerhalb eines Tags
 // zählt jede Schreibweise. Die Bedingungen werden dafür zusammengesetzt — in die Abfrage kommen
 // aber nur unsere eigenen Platzhalternummern ($1, $2, ...), nie Text aus der Anfrage.
-async function listRecipes({ q, tag, tags, limit } = {}) {
+async function listRecipes(userId, { q, tag, tags, limit } = {}) {
     const search = (q ?? "").trim();
     const wantedLimit = optionalInteger(limit, "limit", MAX_LIST);
     if (wantedLimit === 0)
@@ -418,10 +425,11 @@ async function listRecipes({ q, tag, tags, limit } = {}) {
 
     const wantedTags = [...(tag ? [tag] : []), ...(Array.isArray(tags) ? tags : [])]
         .map((entry) => requiredText(entry, "Tag", MAX_TAG));
-    const params = [];
+    // $1 ist immer der Benutzer
+    const params = [userId];
     const conditions = [];
     for (const name of wantedTags) {
-        const spellings = await matchingTags(name);
+        const spellings = await matchingTags(userId, name);
         if (spellings.length === 0)
             return [];      // dieses Tag kommt an keinem Rezept vor
         params.push(spellings);
@@ -432,7 +440,7 @@ async function listRecipes({ q, tag, tags, limit } = {}) {
     if (search === "") {
         const { rows } = await db.query(`
             SELECT ${SHORT_COLUMNS} FROM recipes r
-            WHERE true${tagWhere}
+            WHERE r.user_id = $1${tagWhere}
             ORDER BY lower(r.name) LIMIT $${params.length + 1}`, [...params, max]);
         return rows;
     }
@@ -441,7 +449,7 @@ async function listRecipes({ q, tag, tags, limit } = {}) {
     const { rows } = await db.query(`
         SELECT ${SHORT_COLUMNS} FROM recipes r
         JOIN recipes_search s ON s.id = r.id
-        WHERE s.document @@ ${query}${tagWhere}
+        WHERE r.user_id = $1 AND s.document @@ ${query}${tagWhere}
         ORDER BY ts_rank(s.document, ${query}) DESC, lower(r.name)
         LIMIT $${params.length + 2}`, [...params, search, max]);
     if (rows.length > 0)
@@ -449,7 +457,7 @@ async function listRecipes({ q, tag, tags, limit } = {}) {
 
     const { rows: fallback } = await db.query(`
         SELECT ${SHORT_COLUMNS} FROM recipes r
-        WHERE r.name ILIKE '%' || $${params.length + 1} || '%'${tagWhere}
+        WHERE r.user_id = $1 AND r.name ILIKE '%' || $${params.length + 1} || '%'${tagWhere}
         ORDER BY lower(r.name) LIMIT $${params.length + 2}`, [...params, search, max]);
     return fallback;
 }
@@ -458,7 +466,7 @@ async function listRecipes({ q, tag, tags, limit } = {}) {
 // Rezept anlegen (id = null) oder ersetzen. Zutaten und Schritte werden komplett neu geschrieben
 // (DELETE + INSERT in einer Transaktion, wie setFeatureActive in smarthome.js): bei Listen mit
 // Reihenfolge ist Ersetzen das einzige, was vorhersagbar ist.
-async function saveRecipe(id, input, userId = null) {
+async function saveRecipe(userId, id, input) {
     const recipe = normalizeRecipe(input);
     // null (löschen) und undefined (nicht mitgeschickt) werden beide zu SQL-NULL; welcher der beiden
     // es war, steht in recipe.nutrients !== undefined
@@ -474,8 +482,8 @@ async function saveRecipe(id, input, userId = null) {
         if (id === null) {
             const { rows: [created] } = await client.query(`
                 INSERT INTO recipes (name, description, servings, prep_minutes, cook_minutes,
-                                     difficulty, tags, source, notes, created_by, nutrients)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb) RETURNING id`,
+                                     difficulty, tags, source, notes, user_id, created_by, nutrients)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11::jsonb) RETURNING id`,
                 [...values, userId, nutrientsJson]);
             recipeId = created.id;
         } else {
@@ -485,12 +493,13 @@ async function saveRecipe(id, input, userId = null) {
                     cook_minutes = $6, difficulty = $7, tags = $8, source = $9, notes = $10,
                     nutrients = CASE WHEN $11::boolean THEN $12::jsonb ELSE nutrients END,
                     updated_at = now()
-                WHERE id = $1 RETURNING id`, [id, ...values, recipe.nutrients !== undefined, nutrientsJson]);
+                WHERE id = $1 AND user_id = $13 RETURNING id`,
+                [id, ...values, recipe.nutrients !== undefined, nutrientsJson, userId]);
             if (!updated)
                 throw new HttpError(404, "Rezept nicht gefunden");
         }
 
-        const ids = await ingredientIds(client, recipe.ingredients.map((entry) => entry.name));
+        const ids = await ingredientIds(client, userId, recipe.ingredients.map((entry) => entry.name));
         await client.query("DELETE FROM recipe_ingredients WHERE recipe_id = $1", [recipeId]);
         await client.query("DELETE FROM recipe_steps WHERE recipe_id = $1", [recipeId]);
 
@@ -531,38 +540,38 @@ async function saveRecipe(id, input, userId = null) {
         await client.query("COMMIT");
     } catch (err) {
         await client.query("ROLLBACK").catch(() => {});
-        // 23505 = unique_violation, hier immer der Name (recipes_name_idx)
+        // 23505 = unique_violation, hier immer der Name (recipes_user_name_idx)
         if (err.code === "23505")
             throw new HttpError(409, `Es gibt schon ein Rezept mit dem Namen „${recipe.name}“`);
         throw err;
     } finally {
         client.release();
     }
-    return getRecipe(recipeId);
+    return getRecipe(userId, recipeId);
 }
 
 // Nur die Nährwerte pro Portion setzen (oder mit null löschen), ohne das Rezept anzufassen: ein
 // Agent rechnet sie oft erst nach dem Anlegen aus und müsste sonst alle Zutaten und Schritte
 // noch einmal schicken (Speichern ersetzt ja die ganze Liste).
-async function setNutrients(id, input) {
+async function setNutrients(userId, id, input) {
     const nutrients = normalizeNutrients(input);
     if (nutrients === undefined)
         fail("nutrients fehlt (null löscht die Nährwerte)");
     const { rows: [recipe] } = await db.query(`
-        UPDATE recipes SET nutrients = $2::jsonb, updated_at = now() WHERE id = $1
-        RETURNING id, name, servings, nutrients`, [id, nutrients && JSON.stringify(nutrients)]);
+        UPDATE recipes SET nutrients = $2::jsonb, updated_at = now() WHERE id = $1 AND user_id = $3
+        RETURNING id, name, servings, nutrients`, [id, nutrients && JSON.stringify(nutrients), userId]);
     if (!recipe)
         throw new HttpError(404, "Rezept nicht gefunden");
     return recipe;
 }
 
-async function deleteRecipe(id) {
-    const { rowCount } = await db.query("DELETE FROM recipes WHERE id = $1", [id]);
+async function deleteRecipe(userId, id) {
+    const { rowCount } = await db.query("DELETE FROM recipes WHERE id = $1 AND user_id = $2", [id, userId]);
     if (rowCount === 0)
         throw new HttpError(404, "Rezept nicht gefunden");
     // Das Bild hängt nicht am ON DELETE CASCADE, es liegt im Dateisystem — und zwar erst
     // hinterher: bliebe das Rezept wider Erwarten stehen, wäre sonst sein Bild schon weg.
-    await deleteImage(id, { quiet: true });
+    await removeImageFiles(id);
     return { deleted: true };
 }
 
@@ -582,9 +591,9 @@ function scaleAmount(amount, factor) {
 }
 
 // Zutaten eines Rezepts, optional auf andere Portionen gerechnet
-async function getRecipeIngredients(id, servings) {
+async function getRecipeIngredients(userId, id, servings) {
     const wanted = parseServings(servings);
-    const recipe = await getRecipe(id);
+    const recipe = await getRecipe(userId, id);
     const target = wanted ?? recipe.servings;
     const factor = target / recipe.servings;
     return {
@@ -625,7 +634,7 @@ function formatAmount(amount) {
  * Liste — außer der Vorrat hat dieselbe Einheit und zu wenig davon, dann nur die fehlende Menge.
  * Mehrere Rezepte werden zusammengefasst: gleiche Zutat und gleiche Einheit werden addiert.
  */
-async function planShoppingList(recipeIds, servings) {
+async function planShoppingList(userId, recipeIds, servings) {
     if (!Array.isArray(recipeIds) || recipeIds.length === 0)
         fail("Mindestens ein Rezept angeben");
     if (recipeIds.length > 20)
@@ -681,7 +690,7 @@ async function planShoppingList(recipeIds, servings) {
 
     const used = [];            // welches Rezept mit wie vielen Portionen gerechnet wurde
     for (const recipeId of recipeIds) {
-        const recipe = await getRecipeIngredients(recipeId, servings);
+        const recipe = await getRecipeIngredients(userId, recipeId, servings);
         const { ingredients, servings: target } = recipe;
         used.push({ id: recipe.id, name: recipe.name, servings: target });
 
@@ -739,7 +748,7 @@ async function planShoppingList(recipeIds, servings) {
     const { rows: pantry } = await db.query(`
         SELECT i.name, p.always_available, p.amount, p.unit
         FROM pantry_items p JOIN ingredients i ON i.id = p.ingredient_id
-        WHERE lower(i.name) = ANY($1::text[])`, [names]);
+        WHERE i.user_id = $2 AND lower(i.name) = ANY($1::text[])`, [names, userId]);
     const inPantry = new Map(pantry.map((row) => [row.name.toLowerCase(), row]));
 
     // Was eine Zutat für die Liste heißt: { item, pantry }. item = muss gekauft werden (null: nichts),
@@ -827,8 +836,8 @@ async function planShoppingList(recipeIds, servings) {
 }
 
 // Einkaufsliste eines einzelnen Rezepts, für die Seite und /api/recipes/:id/shopping-list
-async function getShoppingList(id, servings) {
-    return planShoppingList([id], servings);
+async function getShoppingList(userId, id, servings) {
+    return planShoppingList(userId, [id], servings);
 }
 
 /*************** Bilder **********************************************************************/
@@ -856,7 +865,7 @@ function imagePath(id, ext) {
     return path.join(IMAGE_DIR, `${id}.${ext}`);
 }
 
-async function saveImage(id, buffer) {
+async function saveImage(userId, id, buffer) {
     if (buffer.length === 0)
         fail("Es wurde kein Bild gesendet");
     if (buffer.length > MAX_IMAGE_BYTES)
@@ -865,9 +874,7 @@ async function saveImage(id, buffer) {
     if (!type)
         fail("Nur JPEG, PNG oder WebP");
 
-    const { rows: [recipe] } = await db.query("SELECT id FROM recipes WHERE id = $1", [id]);
-    if (!recipe)
-        throw new HttpError(404, "Rezept nicht gefunden");
+    await ownRecipe(userId, id);
 
     await fs.promises.mkdir(IMAGE_DIR, { recursive: true });
     await fs.promises.writeFile(imagePath(id, type.ext), buffer);
@@ -883,9 +890,9 @@ async function saveImage(id, buffer) {
 }
 
 // { mime, updatedAt, data } oder 404, wenn es kein Bild gibt
-async function readImage(id) {
+async function readImage(userId, id) {
     const { rows: [recipe] } = await db.query(
-        "SELECT image_mime, image_updated_at FROM recipes WHERE id = $1", [id]);
+        "SELECT image_mime, image_updated_at FROM recipes WHERE id = $1 AND user_id = $2", [id, userId]);
     if (!recipe)
         throw new HttpError(404, "Rezept nicht gefunden");
     const type = IMAGE_TYPES.find((entry) => entry.mime === recipe.image_mime);
@@ -899,14 +906,24 @@ async function readImage(id) {
     }
 }
 
-// quiet: beim Löschen eines Rezepts darf das Bild auch fehlen
-async function deleteImage(id, { quiet = false } = {}) {
+// 404, wenn es das Rezept nicht gibt oder es einem anderen Benutzer gehört. Vor jeder Änderung
+// an einer Bilddatei: die Dateien heißen nur nach der id, das Dateisystem kennt keine Besitzer.
+async function ownRecipe(userId, id) {
+    const { rows: [recipe] } = await db.query("SELECT id FROM recipes WHERE id = $1 AND user_id = $2", [id, userId]);
+    if (!recipe)
+        throw new HttpError(404, "Rezept nicht gefunden");
+}
+
+async function removeImageFiles(id) {
     for (const type of IMAGE_TYPES)
         await fs.promises.rm(imagePath(id, type.ext), { force: true });
-    const { rowCount } = await db.query(
-        "UPDATE recipes SET image_mime = NULL, image_updated_at = NULL WHERE id = $1", [id]);
-    if (rowCount === 0 && !quiet)
-        throw new HttpError(404, "Rezept nicht gefunden");
+}
+
+// erst prüfen, dann löschen: sonst könnte jeder das Bild eines fremden Rezepts entfernen
+async function deleteImage(userId, id) {
+    await ownRecipe(userId, id);
+    await removeImageFiles(id);
+    await db.query("UPDATE recipes SET image_mime = NULL, image_updated_at = NULL WHERE id = $1", [id]);
     return { deleted: true };
 }
 
@@ -915,7 +932,7 @@ module.exports = {
     listRecipes, getRecipe, saveRecipe, setNutrients, deleteRecipe,
     getRecipeIngredients, getShoppingList, planShoppingList,
     listIngredients, createIngredient, findIngredient, listTags,
-    saveImage, readImage, deleteImage,
+    saveImage, readImage, deleteImage, removeImageFiles,
     // für pantry.js und mcp.js
     fail, optionalText, optionalAmount, optionalBoolean, requiredText, parseServings,
 };

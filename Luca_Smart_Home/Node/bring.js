@@ -328,7 +328,7 @@ async function addItems(userId, items, list) {
 // Benutzer ausdrücklich gewählt hat: chosen ist die Liste der gewählten Namen, genau einer je
 // Alternative. Ohne Wahl wird nichts geschrieben — lieber nachfragen als beides eintragen.
 async function sendRecipes(userId, recipeIds, servings, list, chosen = []) {
-    const plan = await recipes.planShoppingList(recipeIds, servings);
+    const plan = await recipes.planShoppingList(userId, recipeIds, servings);
     if (!Array.isArray(chosen) || chosen.some((name) => typeof name !== "string"))
         throw new HttpError(400, "choices muss eine Liste von Namen sein");
     const picked = new Set(chosen.map((name) => name.trim().toLowerCase()));

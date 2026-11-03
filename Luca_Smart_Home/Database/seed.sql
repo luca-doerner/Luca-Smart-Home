@@ -95,59 +95,76 @@ CROSS JOIN (VALUES
 WHERE f.type = 'ambilight'
   AND NOT EXISTS (SELECT 1 FROM setting_definitions s WHERE s.feature_id = f.id AND s.name = d.name);
 
+
 -- ############################################################################################
--- Recipes: a small basic pantry and two example recipes
+-- Recipes: a small basic pantry and two example recipes, for every user on their own
+--
+-- Since every user has their own recipes, ingredients and pantry, the start data is no longer
+-- created once for the whole database but once per user, by this function. It is called below
+-- for every user who did not get it yet (users.starter_data_at IS NULL), and by
+-- "node user.js add" right after a new user is created, so nobody has to wait for the next
+-- deploy. The column is the guard: what a user renames, changes or deletes stays, the next
+-- deploy does not bring it back.
+--
+-- Inside, the old two guards are still there, now per user: the basic pantry only if the user
+-- has no pantry at all, the example recipes only if the user has no recipe at all. That is what
+-- keeps the data that existed before the users had their own (schema.sql hands it to the first
+-- user) from getting a second Lasagne.
 -- ############################################################################################
 
--- The things that are simply always there. Own guard: without it the basic pantry would never
--- arrive once there is already a recipe, because the guard of the recipes below would return
--- first. ON CONFLICT ... DO UPDATE SET name = ingredients.name writes nothing (it keeps the
--- spelling that is in the table) and is only there so that RETURNING hands out the id.
-DO $$
+CREATE OR REPLACE FUNCTION seed_starter_data(p_user_id BIGINT) RETURNS void AS $$
 DECLARE
+    v_recipe_id     BIGINT;
     v_ingredient_id BIGINT;
     v_basic         TEXT[];
 BEGIN
-    IF EXISTS (SELECT 1 FROM pantry_items) THEN
+    -- FOR UPDATE: user.js and a deploy at the same time must not both create the data
+    PERFORM 1 FROM users WHERE id = p_user_id AND starter_data_at IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+    UPDATE users SET starter_data_at = now() WHERE id = p_user_id;
+
+    -- Recipes and ingredients without an owner exist only while there was no user at all (the old
+    -- seed ran before "node user.js add"). The first user takes them over right here, otherwise
+    -- they would get the examples now AND the old rows at the next deploy (schema.sql) - two
+    -- "Lasagne" for one user, which the unique name stops with an error.
+    UPDATE recipes SET user_id = p_user_id WHERE user_id IS NULL;
+    UPDATE ingredients SET user_id = p_user_id WHERE user_id IS NULL;
+
+    -- The things that are simply always there. ON CONFLICT ... DO UPDATE SET name =
+    -- ingredients.name writes nothing (it keeps the spelling that is in the table) and is only
+    -- there so that RETURNING hands out the id.
+    IF NOT EXISTS (SELECT 1 FROM pantry_items p JOIN ingredients i ON i.id = p.ingredient_id
+                   WHERE i.user_id = p_user_id) THEN
+        FOREACH v_basic SLICE 1 IN ARRAY ARRAY[
+            ['Salz',      'Gewürze',   'TL'],
+            ['Pfeffer',   'Gewürze',   'TL'],
+            ['Olivenöl',  'Öl & Fett', 'EL'],
+            ['Mehl',      'Backen',    'g'],
+            ['Zucker',    'Backen',    'g']
+        ] LOOP
+            INSERT INTO ingredients (user_id, name, category, default_unit)
+                VALUES (p_user_id, v_basic[1], v_basic[2], v_basic[3])
+                ON CONFLICT (user_id, lower(name)) DO UPDATE SET name = ingredients.name
+                RETURNING id INTO v_ingredient_id;
+
+            INSERT INTO pantry_items (ingredient_id, always_available)
+                VALUES (v_ingredient_id, true)
+                ON CONFLICT (ingredient_id) DO NOTHING;
+        END LOOP;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM recipes WHERE user_id = p_user_id) THEN
         RETURN;
     END IF;
 
-    FOREACH v_basic SLICE 1 IN ARRAY ARRAY[
-        ['Salz',      'Gewürze',   'TL'],
-        ['Pfeffer',   'Gewürze',   'TL'],
-        ['Olivenöl',  'Öl & Fett', 'EL'],
-        ['Mehl',      'Backen',    'g'],
-        ['Zucker',    'Backen',    'g']
-    ] LOOP
-        INSERT INTO ingredients (name, category, default_unit)
-            VALUES (v_basic[1], v_basic[2], v_basic[3])
-            ON CONFLICT (lower(name)) DO UPDATE SET name = ingredients.name
-            RETURNING id INTO v_ingredient_id;
-
-        INSERT INTO pantry_items (ingredient_id, always_available)
-            VALUES (v_ingredient_id, true)
-            ON CONFLICT (ingredient_id) DO NOTHING;
-    END LOOP;
-END
-$$;
-
--- Two example recipes, so the page and the MCP tools have something to show. Only run while
--- there is no recipe at all, same guard idea as the ambilight feature above: renaming, changing
--- or deleting them on the Pi stays, they are not created again on the next deploy.
---
--- The ingredients are written into the catalogue by name first (only the ones that are missing),
--- then recipe_ingredients is filled from a VALUES list that is joined to the catalogue over
--- lower(name) - exactly what recipes.js does later when a recipe is saved through the API.
-DO $$
-DECLARE
-    v_recipe_id BIGINT;
-BEGIN
-    IF EXISTS (SELECT 1 FROM recipes) THEN
-        RETURN;
-    END IF;
-
-    INSERT INTO ingredients (name, category, default_unit)
-    SELECT d.name, d.category, d.default_unit
+    -- The ingredients are written into the catalogue of the user by name first (only the ones
+    -- that are missing; Salz, Pfeffer, Mehl and Zucker are usually there from the pantry above),
+    -- then recipe_ingredients is filled from a VALUES list that is joined to the catalogue over
+    -- lower(name) - exactly what recipes.js does later when a recipe is saved through the API.
+    INSERT INTO ingredients (user_id, name, category, default_unit)
+    SELECT p_user_id, d.name, d.category, d.default_unit
     FROM (VALUES
         ('Hackfleisch',        'Fleisch',     'g'),
         ('Zwiebel',            'Gemüse',      NULL),
@@ -161,13 +178,17 @@ BEGIN
         ('Parmesan',           'Milchprodukte', 'g'),
         ('Oregano',            'Gewürze',     'TL'),
         ('Ei',                 'Milchprodukte', NULL),
-        ('Mineralwasser',      'Getränke',    'ml')
+        ('Mineralwasser',      'Getränke',    'ml'),
+        ('Salz',               'Gewürze',     'TL'),
+        ('Pfeffer',            'Gewürze',     'TL'),
+        ('Mehl',               'Backen',      'g'),
+        ('Zucker',             'Backen',      'g')
     ) AS d (name, category, default_unit)
-    WHERE NOT EXISTS (SELECT 1 FROM ingredients i WHERE lower(i.name) = lower(d.name));
+    ON CONFLICT (user_id, lower(name)) DO NOTHING;
 
     /* ---- Lasagne ---- */
-    INSERT INTO recipes (name, description, servings, prep_minutes, cook_minutes, difficulty, tags, notes)
-    VALUES ('Lasagne',
+    INSERT INTO recipes (user_id, name, description, servings, prep_minutes, cook_minutes, difficulty, tags, notes)
+    VALUES (p_user_id, 'Lasagne',
             'Klassische Lasagne mit Hackfleischsoße und Béchamel.',
             4, 30, 45, 'mittel',
             ARRAY['Hauptgericht', 'Nudeln', 'Ofen'],
@@ -192,7 +213,7 @@ BEGIN
         (13, 'Lasagneplatten',    12,                    NULL,       NULL,               'Zum Schichten',          false),
         (14, 'Parmesan',          80,                    'g',        'frisch gerieben',  'Zum Schichten',          true)
     ) AS d (position, name, amount, unit, note, group_label, optional)
-    JOIN ingredients i ON lower(i.name) = lower(d.name);
+    JOIN ingredients i ON i.user_id = p_user_id AND lower(i.name) = lower(d.name);
 
     INSERT INTO recipe_steps (recipe_id, position, text, minutes)
     VALUES
@@ -204,8 +225,8 @@ BEGIN
         (v_recipe_id, 6, 'Bei 180 °C Ober-/Unterhitze 45 Minuten backen, dann zehn Minuten ruhen lassen.', 45);
 
     /* ---- Pfannkuchen ---- */
-    INSERT INTO recipes (name, description, servings, prep_minutes, cook_minutes, difficulty, tags, notes)
-    VALUES ('Pfannkuchen',
+    INSERT INTO recipes (user_id, name, description, servings, prep_minutes, cook_minutes, difficulty, tags, notes)
+    VALUES (p_user_id, 'Pfannkuchen',
             'Dünne Pfannkuchen aus vier Zutaten, süß oder salzig.',
             2, 10, 15, 'einfach',
             ARRAY['Hauptgericht', 'vegetarisch', 'süß'],
@@ -223,12 +244,24 @@ BEGIN
         (6, 'Mineralwasser', 50,                    'ml',       'macht den Teig luftiger'),
         (7, 'Butter',        NULL,                  NULL,       'zum Braten')
     ) AS d (position, name, amount, unit, note)
-    JOIN ingredients i ON lower(i.name) = lower(d.name);
+    JOIN ingredients i ON i.user_id = p_user_id AND lower(i.name) = lower(d.name);
 
     INSERT INTO recipe_steps (recipe_id, position, text, minutes)
     VALUES
         (v_recipe_id, 1, 'Mehl, Milch, Eier, Salz und Zucker glatt rühren, zum Schluss das Mineralwasser unterrühren.', 5),
         (v_recipe_id, 2, 'Den Teig zehn Minuten ruhen lassen.', 10),
         (v_recipe_id, 3, 'In einer Pfanne etwas Butter zerlaufen lassen und die Pfannkuchen von beiden Seiten goldbraun backen.', 15);
+END
+$$ LANGUAGE plpgsql;
+
+-- every user who has not got the start data yet; on the first run after the change that is
+-- every user there is, and for whoever already has recipes and a pantry it only sets the column
+DO $$
+DECLARE
+    v_user_id BIGINT;
+BEGIN
+    FOR v_user_id IN SELECT id FROM users WHERE starter_data_at IS NULL ORDER BY id LOOP
+        PERFORM seed_starter_data(v_user_id);
+    END LOOP;
 END
 $$;

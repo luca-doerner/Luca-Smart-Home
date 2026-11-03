@@ -30,6 +30,7 @@ if (!process.env.PGPASSWORD && fs.existsSync(ENV_FILE)) {
 
 const auth = require("./auth");
 const db = require("./db");
+const recipes = require("./recipes");
 
 // piped input (echo ... | node user.js): all lines at once, handed out one per question
 let pipedLines = null;
@@ -106,8 +107,12 @@ const COMMANDS = {
         if (existing)
             throw new Error(`Benutzer „${name}“ gibt es schon (neues Passwort: node user.js password ${name})`);
         const hash = await askNewPassword();
-        await db.query("INSERT INTO users (username, password_hash) VALUES ($1, $2)", [name, hash]);
-        console.log(`Benutzer „${name}“ angelegt.`);
+        const { rows: [user] } = await db.query(
+            "INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id", [name, hash]);
+        // jeder Benutzer hat eigene Rezepte und einen eigenen Vorrat: die Beispiele und der
+        // Grundvorrat kommen sofort, nicht erst mit dem nächsten Deploy (Funktion aus seed.sql)
+        await db.query("SELECT seed_starter_data($1)", [user.id]);
+        console.log(`Benutzer „${name}“ angelegt, mit zwei Beispielrezepten und dem Grundvorrat.`);
     },
 
     async password(name) {
@@ -120,8 +125,13 @@ const COMMANDS = {
 
     async delete(name) {
         const user = await findUser(name);
+        // seine Rezepte gehen mit (ON DELETE CASCADE), ihre Bilder liegen aber im Dateisystem
+        const { rows: withImage } = await db.query(
+            "SELECT id FROM recipes WHERE user_id = $1 AND image_mime IS NOT NULL", [user.id]);
         await db.query("DELETE FROM users WHERE id = $1", [user.id]);
-        console.log(`Benutzer „${user.username}“ gelöscht.`);
+        for (const recipe of withImage)
+            await recipes.removeImageFiles(recipe.id);
+        console.log(`Benutzer „${user.username}“ gelöscht, samt Rezepten, Zutaten und Vorrat.`);
     },
 
     // token add|list|delete, siehe TOKEN_COMMANDS

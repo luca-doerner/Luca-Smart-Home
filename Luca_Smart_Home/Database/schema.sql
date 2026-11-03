@@ -22,15 +22,11 @@ CREATE TABLE IF NOT EXISTS devices (
     parent_device_id BIGINT REFERENCES devices (id) ON DELETE CASCADE,
     name             TEXT NOT NULL,
     type             TEXT,              -- free text, e.g. "tv", "light", "led_strip"
-    pinned_at        TIMESTAMPTZ,       -- pinned in the navigation since then, NULL = not pinned
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT devices_one_location CHECK (num_nonnulls(room_id, parent_device_id) = 1),
     -- names are unique per room or per parent device
     CONSTRAINT devices_unique_name UNIQUE NULLS NOT DISTINCT (room_id, parent_device_id, name)
 );
-
--- databases created before pinning existed
-ALTER TABLE devices ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS devices_room_id_idx ON devices (room_id);
 CREATE INDEX IF NOT EXISTS devices_parent_device_id_idx ON devices (parent_device_id);
@@ -241,6 +237,10 @@ CREATE TABLE IF NOT EXISTS users (
 -- "Luca" and "luca" are the same user
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx ON users (lower(username));
 
+-- when the user got the example recipes and the basic pantry (seed_starter_data in seed.sql),
+-- NULL = not yet; that is the guard that keeps a deleted example recipe from coming back
+ALTER TABLE users ADD COLUMN IF NOT EXISTS starter_data_at TIMESTAMPTZ;
+
 -- logged in browsers: the session cookie holds a random token, only its SHA-256 hash is stored,
 -- so the database alone is not enough to take over a session
 CREATE TABLE IF NOT EXISTS sessions (
@@ -253,6 +253,32 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id);
+
+-- devices a user pinned in the navigation, in the order they were pinned. Per user: the devices
+-- are shared, but what somebody wants to see at the top is their own business.
+CREATE TABLE IF NOT EXISTS device_pins (
+    user_id   BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    device_id BIGINT NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
+    pinned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, device_id)
+);
+
+-- Before device_pins the pin was a column of the device (devices.pinned_at) and counted for
+-- everybody. Whoever exists when this runs gets those pins, then the column goes away - the
+-- information_schema check makes it run exactly once.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'devices' AND column_name = 'pinned_at') THEN
+        INSERT INTO device_pins (user_id, device_id, pinned_at)
+        SELECT u.id, d.id, d.pinned_at
+        FROM users u CROSS JOIN devices d
+        WHERE d.pinned_at IS NOT NULL
+        ON CONFLICT DO NOTHING;
+        ALTER TABLE devices DROP COLUMN pinned_at;
+    END IF;
+END
+$$;
 
 -- every device with the room it is in (also through parent devices) and its path,
 -- e.g. "Wohnzimmer / Fernseher / Ambilight LEDs"
@@ -279,18 +305,29 @@ SELECT * FROM tree;
 -- through a functional index on lower(name) like users_username_idx.
 -- ############################################################################################
 
--- catalogue of ingredients; every ingredient exists only once and is used by the recipes and by
--- the pantry, that is what makes "take what is at home off the shopping list" possible
+-- Everything from here on belongs to ONE user (user_id): every user has their own recipes, their
+-- own catalogue of ingredients and their own pantry. Rooms, devices and features above are shared,
+-- they are the hardware of the house. recipe_ingredients, recipe_steps and pantry_items have no
+-- user_id of their own: they belong to whoever owns their recipe or ingredient.
+
+-- catalogue of ingredients of a user; every ingredient exists only once per user and is used by
+-- the recipes and by the pantry, that is what makes "take what is at home off the shopping list"
+-- possible
 CREATE TABLE IF NOT EXISTS ingredients (
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id      BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     name         TEXT NOT NULL,
     category     TEXT,              -- free text, e.g. "Gemüse", only used to sort the list
     default_unit TEXT,              -- suggested in the form, e.g. "g" for Mehl
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- "Mehl" and "mehl" are the same ingredient
-CREATE UNIQUE INDEX IF NOT EXISTS ingredients_name_idx ON ingredients (lower(name));
+-- databases from before the users had their own data; filled and made NOT NULL at the end of the file
+ALTER TABLE ingredients ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
+
+-- "Mehl" and "mehl" are the same ingredient - per user. The old index was over the name alone.
+DROP INDEX IF EXISTS ingredients_name_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS ingredients_user_name_idx ON ingredients (user_id, lower(name));
 
 -- a recipe; its ingredients and its steps are in their own tables below
 --
@@ -301,6 +338,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ingredients_name_idx ON ingredients (lower(nam
 -- image_updated_at: the browser only has to load a picture again when this changes (ETag)
 CREATE TABLE IF NOT EXISTS recipes (
     id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id          BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,   -- whose recipe it is
     name             TEXT NOT NULL,
     description      TEXT,
     servings         INTEGER NOT NULL DEFAULT 4 CHECK (servings > 0),
@@ -317,7 +355,12 @@ CREATE TABLE IF NOT EXISTS recipes (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS recipes_name_idx ON recipes (lower(name));
+-- see ingredients: filled and made NOT NULL at the end of the file
+ALTER TABLE recipes ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
+
+-- a name only has to be unique among the recipes of one user
+DROP INDEX IF EXISTS recipes_name_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS recipes_user_name_idx ON recipes (user_id, lower(name));
 
 -- nutrition PER SERVING: {"kcal": 540, "protein": 32, "carbs": 48, "fat": 21} (kcal and grams),
 -- NULL = not known. Per serving and not for the whole recipe, so changing `servings` does not
@@ -477,6 +520,49 @@ LEFT JOIN (
     FROM recipe_steps
     GROUP BY recipe_id
 ) AS schritte ON schritte.recipe_id = r.id;
+
+-- Recipes and ingredients from before every user had their own: a recipe goes to whoever created
+-- it (created_by), everything else - the whole catalogue and with it the pantry - to the first
+-- user. As long as there is no user at all (a fresh database before "node user.js add"), the
+-- rows stay without an owner; nobody sees them, and the next run hands them out.
+--
+-- Afterwards a recipe can still point to an ingredient of somebody else (a recipe of user 2 that
+-- used the shared "Mehl", which now belongs to user 1). Those get a copy of the ingredient in the
+-- catalogue of the recipe's owner. That part runs every time and finds nothing once it is done.
+DO $$
+DECLARE
+    v_first BIGINT := (SELECT min(id) FROM users);
+BEGIN
+    IF v_first IS NOT NULL THEN
+        UPDATE recipes SET user_id = COALESCE(created_by, v_first) WHERE user_id IS NULL;
+        UPDATE ingredients SET user_id = v_first WHERE user_id IS NULL;
+    END IF;
+
+    INSERT INTO ingredients (user_id, name, category, default_unit)
+    SELECT DISTINCT r.user_id, i.name, i.category, i.default_unit
+    FROM recipe_ingredients ri
+    JOIN recipes r ON r.id = ri.recipe_id
+    JOIN ingredients i ON i.id = ri.ingredient_id
+    WHERE r.user_id IS NOT NULL AND i.user_id IS DISTINCT FROM r.user_id
+    ON CONFLICT (user_id, lower(name)) DO NOTHING;
+
+    UPDATE recipe_ingredients ri SET ingredient_id = own.id
+    FROM recipes r, ingredients i, ingredients own
+    WHERE r.id = ri.recipe_id AND i.id = ri.ingredient_id
+      AND r.user_id IS NOT NULL AND i.user_id IS DISTINCT FROM r.user_id
+      AND own.user_id = r.user_id AND lower(own.name) = lower(i.name);
+
+    -- only once nothing is left without an owner, otherwise the deploy would fail here
+    IF NOT EXISTS (SELECT 1 FROM recipes WHERE user_id IS NULL) THEN
+        ALTER TABLE recipes ALTER COLUMN user_id SET NOT NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM ingredients WHERE user_id IS NULL) THEN
+        ALTER TABLE ingredients ALTER COLUMN user_id SET NOT NULL;
+    END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS recipes_user_id_idx ON recipes (user_id);
 
 -- Replaced on every run, like the rules of the setting definitions above: CREATE TABLE IF NOT
 -- EXISTS does not change a table that is already there, so a new level of difficulty would never
