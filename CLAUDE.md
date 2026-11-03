@@ -52,8 +52,21 @@ rekursive View `devices_with_room`.
 Der Rezeptteil steht daneben: `ingredients` → `recipes` → `recipe_ingredients` / `recipe_steps`,
 dazu `pantry_items` und die View `recipes_search`.
 
+**Was wem gehört:** Zimmer, Geräte, Features und Einstellungen sind **für alle gleich** (das ist
+die Hardware des Hauses). **Pro Benutzer** sind: Rezepte (`recipes.user_id`), der Zutatenkatalog
+(`ingredients.user_id`, Name eindeutig pro Benutzer), der Vorrat, die angehefteten Geräte
+(`device_pins`), Bring!/YAZIO-Konto und Tokens. `pantry_items`, `recipe_ingredients` und
+`recipe_steps` haben **keine** eigene `user_id`: sie gehören dem Besitzer ihrer Zutat bzw. ihres
+Rezepts — darum geht jede Vorrats-Abfrage über `ingredients`. Jede Funktion in `recipes.js` und
+`pantry.js` nimmt `userId` als **ersten** Parameter; ein fremdes Rezept ist `404`, nicht `403`
+(wer es nicht sehen darf, soll nicht erfahren, dass es die id gibt). Eine Zutat in einem Rezept
+gehört immer dem Rezeptbesitzer (`ingredientIds` sucht und legt nur im eigenen Katalog an), ein
+Gericht mit Varianten auch (`setVariantOf` nimmt nur eigene Rezepte als Ziel).
+
 - `devices`: entweder `room_id` **oder** `parent_device_id` (CHECK `num_nonnulls(...) = 1`);
-  ein Trigger verhindert Zyklen; `pinned_at` = in der Navigation angeheftet.
+  ein Trigger verhindert Zyklen. Angeheftet wird pro Benutzer in `device_pins`
+  (`PRIMARY KEY (user_id, device_id)`); die alte Spalte `devices.pinned_at` hat die Migration
+  allen damals vorhandenen Benutzern gegeben und dann gelöscht.
 - `features`: `kind` (`service`/`oneshot`), `executable` (relativ zu `Luca_Smart_Home/`),
   `udp_port`, `exclusive`, `active`. Partieller Unique-Index
   `features_one_active_exclusive`: pro Gerät höchstens ein aktives exklusives Feature.
@@ -104,10 +117,19 @@ dazu `pantry_items` und die View `recipes_search`.
   löschen.
 - `device_setting_definitions` (z. B. `led_count_left`) legt das Seed **nicht** an, die stehen
   direkt auf dem Pi.
-- Der Rezeptteil hat **zwei** Guards im Seed: einen für die Beispielrezepte
-  (`IF EXISTS (SELECT 1 FROM recipes)`) und einen eigenen für den Grundvorrat
-  (`IF EXISTS (SELECT 1 FROM pantry_items)`) — ohne den zweiten käme der Grundvorrat nie, sobald
-  ein Rezept da ist.
+- Beispielrezepte und Grundvorrat legt die Funktion `seed_starter_data(user_id)` (in `seed.sql`)
+  **pro Benutzer genau einmal** an: Guard ist `users.starter_data_at`, darin noch einmal getrennt
+  „hat keinen Vorrat“ und „hat kein Rezept“. Sie läuft beim Deploy für jeden Benutzer ohne
+  Startdaten und direkt bei `node user.js add`. Was ein Benutzer löscht, kommt nicht wieder.
+  Rezepte/Zutaten ohne Besitzer (nur möglich, solange es gar keinen Benutzer gab) übernimmt der
+  erste Benutzer dort — sonst bekäme er die Beispiele doppelt und der eindeutige Name ließe den
+  nächsten Deploy scheitern.
+- Migration auf „pro Benutzer“ (Dateiende von `schema.sql`, läuft jedes Mal, findet danach
+  nichts mehr): ein Rezept geht an `created_by`, sonst an den ersten Benutzer, der ganze alte
+  Katalog samt Vorrat an den ersten Benutzer; benutzt ein Rezept eine Zutat eines anderen, bekommt
+  der Rezeptbesitzer eine Kopie. `SET NOT NULL` erst, wenn nichts ohne Besitzer übrig ist, und in
+  einem **eigenen** `DO`-Block: der Varianten-Trigger ist `DEFERRED`, nach einem `UPDATE recipes`
+  in derselben Transaktion lehnt PostgreSQL `ALTER TABLE` ab („pending trigger events“).
 - Der CHECK auf `recipes.difficulty` wird wie die Setting-Regeln bei jedem Lauf gelöscht und neu
   angelegt (am Dateiende). **Eine neue Schwierigkeitsstufe wird nur dort eingetragen** — dazu
   `DIFFICULTIES` in `recipes.js`.
@@ -215,7 +237,7 @@ Kein Framework, nur `http`/`dgram`/`child_process` + `pg`.
 | `smarthome.js` | Datenbankzugriff: Baum, Geräte, Features, Einstellungen laden/prüfen/speichern |
 | `features.js` | startet/stoppt die Programme, UDP, Oneshot-Läufe, Exklusivitätsregeln |
 | `auth.js` | Login: scrypt-Hash, Session-Token (nur SHA-256 davon in der DB), Ratenbegrenzung, Bearer-Tokens |
-| `user.js` | `sudo node user.js add/password/delete/list` + `token add/list/delete` (keine Registrierungsseite) |
+| `user.js` | `sudo node user.js add/password/delete/list` + `token add/list/delete` (keine Registrierungsseite); `add` legt gleich die Startdaten an, `delete` nimmt Rezepte samt Bilddateien mit |
 | `recipes.js` | Rezepte, Zutaten, Tags, Skalieren, Einkaufsliste, Bilder |
 | `pantry.js` | der Vorrat (`pantry_items`) |
 | `mcp.js` | MCP-Server: JSON-RPC über `POST /api/mcp`, ruft `recipes.js`/`pantry.js`/`bring.js`/`yazio.js` direkt auf |
