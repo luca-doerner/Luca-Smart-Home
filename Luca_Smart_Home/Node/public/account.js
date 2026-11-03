@@ -133,7 +133,7 @@ function yazioConnectedCard(account, errors, reload) {
 }
 
 export async function renderAccountPage() {
-    document.title = "Konto · Smart Home";
+    document.title = "Konto · Luca Smart Home";
     const errors = errorBox();
     const bringSlot = el("div");
     const yazioSlot = el("div");

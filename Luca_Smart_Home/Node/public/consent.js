@@ -48,7 +48,7 @@ async function start() {
         });
         const [client, me] = await Promise.all([api(`/api/oauth/client?${query}`), api("/api/me")]);
         // textContent: der Name kommt vom Client und ist beliebiger Text
-        text.textContent = `„${client.client_name}“ möchte sich mit deinem Smart Home verbinden `
+        text.textContent = `„${client.client_name}“ möchte sich mit deinem Luca Smart Home verbinden `
             + `(Rezepte, Vorrat, Einkaufsliste) und danach zu ${client.redirect_host} zurückkehren. `
             + `Der Zugriff gilt wie dein Benutzer „${me.username}“ und lässt sich jederzeit mit `
             + "sudo node user.js token delete widerrufen. Nur erlauben, wenn du das gerade selbst gestartet hast.";

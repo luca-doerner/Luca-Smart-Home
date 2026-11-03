@@ -48,9 +48,9 @@
       shell: pkill -TERM -f "[n]ode .*Node/server\.js" && sleep 2 || true
       changed_when: false
 
-    ################ Copy the Smart Home folder ################
+    ################ Copy the Luca Smart Home folder ################
     # settings.json is not in the local folder (.gitignore), so the saved settings on the Pi stay
-    - name: Copy the Smart Home folder to the Raspberry Pi
+    - name: Copy the Luca Smart Home folder to the Raspberry Pi
       copy:
         src: "{{ playbook_dir }}/../Luca_Smart_Home/"
         dest: "{{ smart_home_dir }}/"
@@ -72,7 +72,7 @@
         - seed.sql
       changed_when: false
 
-    - name: Build Smart Home C component
+    - name: Build Luca Smart Home C component
       command: make
       args:
         chdir: "{{ smart_home_dir }}/C"
@@ -119,7 +119,7 @@
         mode: "0644"
         content: |
           [Unit]
-          Description=Smart Home Webserver
+          Description=Luca Smart Home Webserver
           After=network.target postgresql.service
           Wants=postgresql.service
 

@@ -39,7 +39,7 @@ const { log } = require("./log");
 
 const SERVER_INFO = {
     name: "luca-smart-home-rezepte",
-    title: "Lucas Smart Home — Rezepte, Bring! und YAZIO",
+    title: "Luca Smart Home — Rezepte, Bring! und YAZIO",
     version: "1.1.0",
 };
 
@@ -50,7 +50,7 @@ const SUPPORTED_VERSIONS = [MODERN_VERSION, ...LEGACY_VERSIONS];
 // was ein "initialize" bekommt, wenn der Client nach einer Version fragt, die wir nicht kennen
 const LEGACY_FALLBACK = "2025-06-18";
 
-const INSTRUCTIONS = "Rezepte, Zutaten und Vorrat aus Lucas Smart Home. Typischer Ablauf: "
+const INSTRUCTIONS = "Rezepte, Zutaten und Vorrat aus Luca Smart Home. Typischer Ablauf: "
     + "search_recipes, dann get_recipe, dann plan_shopping_list, nach dem Ja des Benutzers "
     + "bring_add_items. Die Einträge in from_pantry einer Einkaufsliste gehören nicht auf die "
     + "Liste, müssen dem Benutzer aber genannt werden. Steht in choices eine Alternative "

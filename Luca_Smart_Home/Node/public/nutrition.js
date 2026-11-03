@@ -223,7 +223,7 @@ function addCard(getDate, errors, reload) {
 
 /*************** Seite ************************************************************************/
 export async function renderNutritionPage() {
-    document.title = "Ernährung · Smart Home";
+    document.title = "Ernährung · Luca Smart Home";
     const errors = errorBox();
     const slot = el("div");
     showPage(breadcrumb([{ label: "Ernährung" }]), el("h1", {}, "Ernährung"), errors.node, slot);

@@ -1,5 +1,5 @@
 /*
- * Web server of the smart home: rooms, nested devices and their features, plus the recipes.
+ * Web server of Luca Smart Home: rooms, nested devices and their features, plus the recipes.
  *
  * - pages: /rooms, /rooms/:id, /devices/:id, /recipes, /recipes/:id, /pantry, /nutrition, /account
  *   (one page, public/index.html + public/app.js)
