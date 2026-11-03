@@ -30,6 +30,7 @@ const MAX_TAGS = 20;
 const MAX_TAG = 50;
 const MAX_SERVINGS = 100;
 const MAX_LIST = 50;             // Treffer pro Suche
+const MAX_VARIANT_LABEL = 60;    // kurz, er steht auf einem Reiter
 const DIFFICULTIES = ["einfach", "mittel", "schwer"];
 
 const IMAGE_DIR = process.env.RECIPE_IMAGE_DIR || "/var/lib/luca-smart-home/recipe-images";
@@ -131,6 +132,19 @@ function normalizeNutrients(value) {
         nutrients[key] = Number(number.toFixed(1));
     }
     return nutrients;
+}
+
+// variant_of: die id des Rezepts, zu dessen Gericht dieses gehört. Drei Zustände wie bei den
+// Nährwerten: undefined = nicht mitgeschickt (bleibt, wie es ist — sonst würde jede Änderung durch
+// eine KI, die das Feld vergisst, die Variante still aus ihrem Gericht lösen), null = eigenständig,
+// Zahl = Variante.
+function normalizeVariantOf(value) {
+    if (value === undefined || value === null)
+        return value;
+    const id = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+    if (!Number.isInteger(id) || id < 1)
+        fail("variant_of muss die id eines Rezepts sein (oder null für ein eigenständiges Rezept)");
+    return id;
 }
 
 // Tags ohne Doppelte; "Nudeln" und "nudeln" sind dasselbe Tag, die erste Schreibweise gewinnt
@@ -291,6 +305,11 @@ function normalizeRecipe(input) {
         source: optionalText(input.source, "Quelle", 500),
         notes: optionalText(input.notes, "Notizen"),
         nutrients: normalizeNutrients(input.nutrients),
+        // beide wie die Nährwerte: undefined = unverändert lassen
+        variant_of: normalizeVariantOf(input.variant_of),
+        variant_label: input.variant_label === undefined
+            ? undefined
+            : optionalText(input.variant_label, "Name der Variante", MAX_VARIANT_LABEL),
         ingredients,
         steps: normalizeList(input.steps, "Schritte", MAX_STEPS, normalizeStep),
     };
@@ -367,9 +386,26 @@ async function listTags() {
 /*************** Lesen ***********************************************************************/
 const RECIPE_COLUMNS = `
     id, name, description, servings, prep_minutes, cook_minutes, difficulty, tags, source, notes,
-    nutrients, image_mime IS NOT NULL AS has_image, image_updated_at, created_at, updated_at`;
+    nutrients, variant_of, variant_label, image_mime IS NOT NULL AS has_image, image_updated_at,
+    created_at, updated_at`;
 
-// ein Rezept vollständig: { id, name, ..., ingredients: [...], steps: [...] }
+// Alle Rezepte eines Gerichts, das Grundrezept zuerst. Das Gericht eines Rezepts ist immer
+// COALESCE(variant_of, id) — es gibt nur eine Ebene (Trigger recipes_one_variant_level).
+// „id = $1 OR variant_of = $1“ statt COALESCE(...) = $1, damit die Indizes greifen.
+async function dishVariants(dishId) {
+    const { rows } = await db.query(`
+        SELECT id, name, variant_label, variant_of IS NULL AS is_base
+        FROM recipes
+        WHERE id = $1 OR variant_of = $1
+        ORDER BY variant_of IS NOT NULL, lower(COALESCE(variant_label, name))`, [dishId]);
+    return rows;
+}
+
+// ein Rezept vollständig: { id, name, ..., ingredients: [...], steps: [...], variants: [...] }
+//
+// dish_id:  das Grundrezept des Gerichts (bei einem Grundrezept die eigene id)
+// variants: alle Rezepte des Gerichts samt diesem, das Grundrezept zuerst; leer, wenn es keine
+//           Varianten gibt — dann muss niemand eine Liste mit nur einem Eintrag auswerten
 async function getRecipe(id) {
     const { rows: [recipe] } = await db.query(`SELECT ${RECIPE_COLUMNS} FROM recipes WHERE id = $1`, [id]);
     if (!recipe)
@@ -383,8 +419,22 @@ async function getRecipe(id) {
         ORDER BY r.position`, [id]);
     const { rows: steps } = await db.query(
         "SELECT text, minutes FROM recipe_steps WHERE recipe_id = $1 ORDER BY position", [id]);
+    const dishId = recipe.variant_of ?? recipe.id;
+    const variants = await dishVariants(dishId);
 
-    return { ...recipe, ingredients, steps };
+    return { ...recipe, dish_id: dishId, ingredients, steps, variants: variants.length > 1 ? variants : [] };
+}
+
+// Die Grundrezepte aller Gerichte, für die Auswahl „Variante von“ auf der Seite. Nur die
+// Grundrezepte: eine Variante auszuwählen hieße ohnehin ihr Gericht (setVariantOf).
+async function listDishes() {
+    const { rows } = await db.query(`
+        SELECT r.id, r.name,
+               (SELECT count(*)::int FROM recipes v WHERE v.variant_of = r.id) + 1 AS variant_count
+        FROM recipes r
+        WHERE r.variant_of IS NULL
+        ORDER BY lower(r.name)`);
+    return rows;
 }
 
 // Tags mit der Schreibweise, die in der Datenbank steht: so findet "vegetarisch" auch
@@ -396,8 +446,15 @@ async function matchingTags(tag) {
 }
 
 // Suchtreffer in der kurzen Form, absichtlich klein, damit ein Agent viele davon lesen kann
+//
+// dish_id und variant_count: Rezepte mit derselben dish_id sind Varianten eines Gerichts,
+// variant_count zählt sie samt Grundrezept (1 = keine Varianten). Die Seite fasst sie damit zu
+// einer Karte zusammen, ein Agent sieht, dass er nachfragen muss, welche gemeint ist.
 const SHORT_COLUMNS = `
-    r.id, r.name, r.description, r.tags, r.servings,
+    r.id, r.name, r.variant_label, r.description, r.tags, r.servings,
+    COALESCE(r.variant_of, r.id) AS dish_id,
+    (SELECT count(*)::int FROM recipes v
+     WHERE v.id = COALESCE(r.variant_of, r.id) OR v.variant_of = COALESCE(r.variant_of, r.id)) AS variant_count,
     CASE WHEN r.prep_minutes IS NULL AND r.cook_minutes IS NULL THEN NULL
          ELSE COALESCE(r.prep_minutes, 0) + COALESCE(r.cook_minutes, 0) END AS total_minutes,
     r.image_mime IS NOT NULL AS has_image`;
@@ -474,21 +531,26 @@ async function saveRecipe(id, input, userId = null) {
         if (id === null) {
             const { rows: [created] } = await client.query(`
                 INSERT INTO recipes (name, description, servings, prep_minutes, cook_minutes,
-                                     difficulty, tags, source, notes, created_by, nutrients)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb) RETURNING id`,
-                [...values, userId, nutrientsJson]);
+                                     difficulty, tags, source, notes, created_by, nutrients, variant_label)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12) RETURNING id`,
+                [...values, userId, nutrientsJson, recipe.variant_label ?? null]);
             recipeId = created.id;
         } else {
-            // $11 sagt, ob die Nährwerte überhaupt mitgeschickt wurden; sonst bleibt der alte Wert
+            // $11 und $13 sagen, ob Nährwerte und Name der Variante überhaupt mitgeschickt wurden;
+            // sonst bleibt der alte Wert
             const { rows: [updated] } = await client.query(`
                 UPDATE recipes SET name = $2, description = $3, servings = $4, prep_minutes = $5,
                     cook_minutes = $6, difficulty = $7, tags = $8, source = $9, notes = $10,
                     nutrients = CASE WHEN $11::boolean THEN $12::jsonb ELSE nutrients END,
+                    variant_label = CASE WHEN $13::boolean THEN $14 ELSE variant_label END,
                     updated_at = now()
-                WHERE id = $1 RETURNING id`, [id, ...values, recipe.nutrients !== undefined, nutrientsJson]);
+                WHERE id = $1 RETURNING id`, [id, ...values, recipe.nutrients !== undefined, nutrientsJson,
+                recipe.variant_label !== undefined, recipe.variant_label ?? null]);
             if (!updated)
                 throw new HttpError(404, "Rezept nicht gefunden");
         }
+        if (recipe.variant_of !== undefined)
+            await setVariantOf(client, recipeId, recipe.variant_of);
 
         const ids = await ingredientIds(client, recipe.ingredients.map((entry) => entry.name));
         await client.query("DELETE FROM recipe_ingredients WHERE recipe_id = $1", [recipeId]);
@@ -534,11 +596,47 @@ async function saveRecipe(id, input, userId = null) {
         // 23505 = unique_violation, hier immer der Name (recipes_name_idx)
         if (err.code === "23505")
             throw new HttpError(409, `Es gibt schon ein Rezept mit dem Namen „${recipe.name}“`);
+        // P0001 = RAISE EXCEPTION, hier nur der Varianten-Trigger. setVariantOf lässt es nicht so
+        // weit kommen; kommt es doch, ist die deutsche Meldung des Triggers die beste Antwort.
+        if (err.code === "P0001")
+            throw new HttpError(409, err.message);
         throw err;
     } finally {
         client.release();
     }
     return getRecipe(recipeId);
+}
+
+// Ein Rezept einem Gericht zuordnen (target = id eines Rezepts) oder herauslösen (null). Es gibt
+// nur eine Ebene, deshalb wird hier umgebaut statt abgelehnt — ein Agent oder die Seite sagt
+// einfach „gehört zu Rezept X“, und das Ergebnis ist immer ein gültiges Gericht:
+//
+// - X ist eine Variante: gemeint ist ihr Gericht, also wird es eine Variante von X' Grundrezept
+// - dieses Rezept hat selbst Varianten: die kommen mit ins neue Gericht (sonst zwei Ebenen)
+// - X ist eine Variante DIESES Rezepts: X wird das neue Grundrezept, dieses Rezept und alle
+//   anderen Varianten zeigen danach auf X („Grundrezept wechseln“)
+// - null: eine Variante wird eigenständig. Ein Grundrezept bleibt, was es ist — seine Varianten
+//   stünden sonst ohne Gericht da; die löst man einzeln.
+//
+// Läuft in der Transaktion von saveRecipe; der Trigger prüft erst beim COMMIT.
+async function setVariantOf(client, id, target) {
+    if (target === null) {
+        await client.query("UPDATE recipes SET variant_of = NULL WHERE id = $1", [id]);
+        return;
+    }
+    if (target === id)
+        fail("Ein Rezept kann keine Variante von sich selbst sein (variant_of)");
+    const { rows: [other] } = await client.query(
+        "SELECT COALESCE(variant_of, id) AS dish_id FROM recipes WHERE id = $1", [target]);
+    if (!other)
+        fail(`variant_of: Es gibt kein Rezept mit der id ${target}`);
+    if (other.dish_id === id) {
+        await client.query("UPDATE recipes SET variant_of = $2 WHERE (id = $1 OR variant_of = $1) AND id <> $2",
+            [id, target]);
+        await client.query("UPDATE recipes SET variant_of = NULL WHERE id = $1", [target]);
+        return;
+    }
+    await client.query("UPDATE recipes SET variant_of = $2 WHERE id = $1 OR variant_of = $1", [id, other.dish_id]);
 }
 
 // Nur die Nährwerte pro Portion setzen (oder mit null löschen), ohne das Rezept anzufassen: ein
@@ -556,14 +654,35 @@ async function setNutrients(id, input) {
     return recipe;
 }
 
+// Wird das Grundrezept eines Gerichts gelöscht, wird die älteste Variante das neue Grundrezept und
+// die anderen zeigen auf sie. Sonst zerfiele das Gericht über ON DELETE SET NULL in lauter einzelne
+// Rezepte. new_base in der Antwort sagt, welches es geworden ist.
 async function deleteRecipe(id) {
-    const { rowCount } = await db.query("DELETE FROM recipes WHERE id = $1", [id]);
-    if (rowCount === 0)
-        throw new HttpError(404, "Rezept nicht gefunden");
+    const client = await db.connect();
+    let newBase = null;
+    try {
+        await client.query("BEGIN");
+        const { rows: [next] } = await client.query(
+            "SELECT id, name FROM recipes WHERE variant_of = $1 ORDER BY created_at, id LIMIT 1", [id]);
+        if (next) {
+            await client.query("UPDATE recipes SET variant_of = $2 WHERE variant_of = $1 AND id <> $2", [id, next.id]);
+            await client.query("UPDATE recipes SET variant_of = NULL WHERE id = $1", [next.id]);
+            newBase = next;
+        }
+        const { rowCount } = await client.query("DELETE FROM recipes WHERE id = $1", [id]);
+        if (rowCount === 0)
+            throw new HttpError(404, "Rezept nicht gefunden");
+        await client.query("COMMIT");
+    } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+    } finally {
+        client.release();
+    }
     // Das Bild hängt nicht am ON DELETE CASCADE, es liegt im Dateisystem — und zwar erst
     // hinterher: bliebe das Rezept wider Erwarten stehen, wäre sonst sein Bild schon weg.
     await deleteImage(id, { quiet: true });
-    return { deleted: true };
+    return newBase ? { deleted: true, new_base: newBase } : { deleted: true };
 }
 
 /*************** Skalieren *******************************************************************/
@@ -912,7 +1031,7 @@ async function deleteImage(id, { quiet = false } = {}) {
 
 module.exports = {
     MAX_IMAGE_BYTES, DIFFICULTIES,
-    listRecipes, getRecipe, saveRecipe, setNutrients, deleteRecipe,
+    listRecipes, getRecipe, listDishes, saveRecipe, setNutrients, deleteRecipe,
     getRecipeIngredients, getShoppingList, planShoppingList,
     listIngredients, createIngredient, findIngredient, listTags,
     saveImage, readImage, deleteImage,

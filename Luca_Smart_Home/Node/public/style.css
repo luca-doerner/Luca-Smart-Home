@@ -1174,6 +1174,22 @@ a.badge:hover {
     margin-bottom: 12px;
 }
 
+/* Reiter für die Varianten eines Gerichts: Links im Stil der Auswahlknöpfe, die aktuelle Variante
+   ist gefüllt wie ein gewählter Knopf */
+.variant-tabs {
+    margin: 12px 0 16px;
+}
+
+.variant-tabs .choice {
+    text-decoration: none;
+}
+
+.variant-tabs .choice[aria-current="page"] {
+    color: #ffffff;
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
 /* Das Bild liegt oben auf der Karte und nicht daneben: daneben bliebe für den Text in einer
    220px-Spalte zu wenig übrig, und „4 Portionen · 75 min“ würde umbrechen. */
 .recipe-card {

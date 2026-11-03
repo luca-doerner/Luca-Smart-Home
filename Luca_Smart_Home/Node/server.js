@@ -325,6 +325,9 @@ const ROUTES = [
         const { recipe } = await readJson(req, MAX_RECIPE_JSON);
         sendJson(res, 201, { recipe: await recipes.saveRecipe(null, recipe, req.user.id) });
     }],
+    // die Grundrezepte aller Gerichte, für die Auswahl „Variante von“ im Formular
+    ["GET", /^\/api\/recipes\/dishes$/, async (req, res) =>
+        sendJson(res, 200, { dishes: await recipes.listDishes() })],
     ["GET", /^\/api\/recipes\/(\d+)$/, async (req, res, id) =>
         sendJson(res, 200, { recipe: await recipes.getRecipe(Number(id)) })],
     ["POST", /^\/api\/recipes\/(\d+)$/, async (req, res, id) => {
