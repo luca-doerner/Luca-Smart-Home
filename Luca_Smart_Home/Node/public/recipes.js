@@ -696,7 +696,7 @@ function yazioBox(recipe, errors) {
 export async function renderRecipePage(id) {
     const errors = errorBox();
     const { recipe } = await api(`/api/recipes/${id}`);
-    document.title = `${recipe.name} · Luca Smart Home`;
+    document.title = `${recipe.name} · Smart Home`;
     const shopping = shoppingListBox(recipe, errors);
     // YAZIO darf fehlen oder spinnen: die Seite zeigt dann einfach keine Karte
     const yazio = await api("/api/yazio").catch(() => ({ connected: false }));
@@ -739,7 +739,7 @@ export async function renderRecipePage(id) {
 export async function renderRecipeEditPage(id) {
     const errors = errorBox();
     const recipe = id === null ? null : (await api(`/api/recipes/${id}`)).recipe;
-    document.title = `${recipe ? recipe.name : "Neues Rezept"} · Luca Smart Home`;
+    document.title = `${recipe ? recipe.name : "Neues Rezept"} · Smart Home`;
     const form = await recipeForm(recipe, errors);
 
     form.form.addEventListener("submit", async (event) => {
@@ -797,7 +797,7 @@ function recipeCard(recipe) {
 }
 
 export async function renderRecipesPage() {
-    document.title = "Rezepte · Luca Smart Home";
+    document.title = "Rezepte · Smart Home";
     const errors = errorBox();
     const params = new URLSearchParams(location.search);
     let query = params.get("q") ?? "";

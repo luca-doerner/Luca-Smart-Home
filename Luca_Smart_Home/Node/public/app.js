@@ -1,4 +1,4 @@
-// the Luca Smart Home page: navigation on the left, pages /rooms, /rooms/:id, /devices/:id
+// the smart home page: navigation on the left, pages /rooms, /rooms/:id, /devices/:id
 // und die Rezepte (/recipes, /recipes/:id, /recipes/new, /pantry) aus recipes.js / pantry.js,
 // das Ernährungstagebuch (/nutrition) aus nutrition.js
 import { api, breadcrumb, cardGrid, el, errorBox, icon, plural, showPage } from "./lib.js";
@@ -194,7 +194,7 @@ function deviceCard(device) {
 
 /*************** Pages ************************************************************************/
 function renderRoomsPage({ rooms, pinned }) {
-    document.title = "Zimmer · Luca Smart Home";
+    document.title = "Zimmer · Smart Home";
     showPage(
         breadcrumb([{ label: "Zimmer" }]),
         el("h1", {}, "Zimmer"),
@@ -216,7 +216,7 @@ function renderRoomsPage({ rooms, pinned }) {
 
 // room: from /api/rooms/:id
 function renderRoomPage(room) {
-    document.title = `${room.name} · Luca Smart Home`;
+    document.title = `${room.name} · Smart Home`;
     showPage(
         breadcrumb([{ label: "Zimmer", href: "/rooms" }, { label: room.name }]),
         el("h1", {}, room.name),
@@ -319,7 +319,7 @@ function deviceSettingsForm(device, errors, onRestarted) {
 
 // device: from /api/devices/:id
 async function renderDevicePage(device) {
-    document.title = `${device.name} · Luca Smart Home`;
+    document.title = `${device.name} · Smart Home`;
     const parent = pathLink(device.parent);
 
     const tabsSlot = el("div");

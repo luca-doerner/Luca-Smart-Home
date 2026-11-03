@@ -1,4 +1,4 @@
-name: Deploy Luca Smart Home
+name: Deploy with Ansible
 
 on:
   push:

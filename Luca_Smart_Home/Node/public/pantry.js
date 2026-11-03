@@ -149,7 +149,7 @@ function addForm(names, { add, errors }) {
 
 /*************** Seite ************************************************************************/
 export async function renderPantryPage() {
-    document.title = "Vorrat · Luca Smart Home";
+    document.title = "Vorrat · Smart Home";
     const errors = errorBox();
     const [{ items }, { ingredients }] = await Promise.all([api("/api/pantry"), api("/api/ingredients")]);
 
