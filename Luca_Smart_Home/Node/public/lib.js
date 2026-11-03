@@ -53,6 +53,8 @@ export function icon(name) {
         plus: "M12 5v14M5 12h14",
         trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13",
         pencil: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+        // zwei Blätter übereinander: „Variante anlegen“ kopiert ein Rezept
+        copy: "M9 9h11v11H9zM5 15H4V4h11v1",
         cart: "M3 4h2l2.5 11h10L20 7H6M9.5 19.5a1 1 0 1 0 0-.1zM16.5 19.5a1 1 0 1 0 0-.1z",
     };
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");

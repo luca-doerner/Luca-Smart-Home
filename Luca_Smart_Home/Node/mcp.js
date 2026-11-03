@@ -55,6 +55,10 @@ const INSTRUCTIONS = "Rezepte, Zutaten und Vorrat aus Lucas Smart Home. Typische
     + "bring_add_items. Die Einträge in from_pantry einer Einkaufsliste gehören nicht auf die "
     + "Liste, müssen dem Benutzer aber genannt werden. Steht in choices eine Alternative "
     + "(„A oder B“), frag den Benutzer, welche er will, und trag nur diese ein.\n\n"
+    + "Ein Gericht kann mehrere Varianten haben (z. B. Chicharrones aus dem Ofen und aus der "
+    + "Heißluftfritteuse): jede Variante ist ein eigenes, vollständiges Rezept. Hat ein Treffer "
+    + "variant_count > 1, frag nach, welche Variante gemeint ist, bevor du eine Einkaufsliste "
+    + "planst oder etwas einträgst.\n\n"
     + "Dazu das Ernährungstagebuch YAZIO (yazio_*): lesen darfst du frei, aber alles, was "
     + "ins Tagebuch SCHREIBT oder daraus löscht (yazio_add_product, yazio_log_recipe, "
     + "yazio_remove_entry), nur nach dem ausdrücklichen Ja des Benutzers. Nährwerte eines "
@@ -139,6 +143,15 @@ const RECIPE_SCHEMA = object({
         description: "Nährwerte PRO PORTION (für YAZIO). Weglassen = unverändert lassen; beim "
             + "Ändern eines Rezepts muss man sie also nicht mitschicken.",
     },
+    variant_of: {
+        type: ["integer", "null"],
+        description: "Macht das Rezept zu einer Variante eines anderen Gerichts: die id irgendeines "
+            + "Rezepts dieses Gerichts (das Grundrezept wird automatisch gefunden). null = "
+            + "eigenständiges Rezept. Weglassen = unverändert lassen.",
+    },
+    variant_label: text("Kurzer Name der Variante für die Reiter auf der Seite, z. B. „Ofen“ oder "
+        + "„Airfryer“. Weglassen = unverändert lassen, leer = keiner (dann gilt der Rezeptname).",
+        { maxLength: 60 }),
     ingredients: list(INGREDIENT_SCHEMA, "Die Zutaten in ihrer Reihenfolge."),
     steps: list(STEP_SCHEMA, "Die Arbeitsschritte in ihrer Reihenfolge."),
 }, ["name"]);
@@ -153,7 +166,11 @@ const TOOLS = [
         description: "Sucht Rezepte über Name, Tags, Zutaten und Zubereitungstext (deutsche "
             + "Volltextsuche, Treffer im Namen zählen am meisten). Ohne query kommen alle "
             + "Rezepte. Liefert die kurze Form — mit der id dann get_recipe oder "
-            + "plan_shopping_list aufrufen.",
+            + "plan_shopping_list aufrufen.\n\n"
+            + "Treffer mit derselben dish_id sind Varianten eines Gerichts; variant_count sagt, "
+            + "wie viele Rezepte das Gericht hat (1 = keine Varianten), variant_label ist der "
+            + "kurze Name der Variante. Nicht alle Varianten müssen unter den Treffern sein — "
+            + "get_recipe zeigt sie vollständig.",
         inputSchema: object({
             query: text("Suchwörter, z. B. „Hackfleisch“ oder „schnelles Nudelgericht“."),
             tags: list(text("Ein Tag."), "Nur Rezepte, an denen alle diese Tags stehen. "
@@ -168,7 +185,10 @@ const TOOLS = [
         name: "get_recipe",
         title: "Rezept lesen",
         description: "Ein Rezept vollständig: Zutaten mit Mengen und Gruppen, Schritte, Tags, Zeiten. "
-            + ALTERNATIVES_HINT,
+            + ALTERNATIVES_HINT + "\n\n"
+            + "variants listet alle Rezepte desselben Gerichts (id, name, variant_label, is_base = "
+            + "Grundrezept), dieses eingeschlossen; leer, wenn es keine Varianten gibt. dish_id ist "
+            + "das Grundrezept.",
         inputSchema: object({ id: integer("Die id aus search_recipes.") }, ["id"]),
         run: async ({ id }, user) => ({ recipe: await recipes.getRecipe(user.id, id) }),
     },
@@ -210,7 +230,12 @@ const TOOLS = [
         description: "Legt ein neues Rezept an. Zutaten werden über ihren Namen angegeben; "
             + "Namen, die der Katalog noch nicht kennt, werden dabei angelegt.\n\n"
             + "Steht im Rezept „A oder B“, werden A und B zwei Zutaten mit demselben "
-            + "alternative_group (z. B. „Schärfe“) — nicht B in den Hinweis von A schreiben.",
+            + "alternative_group (z. B. „Schärfe“) — nicht B in den Hinweis von A schreiben.\n\n"
+            + "Eine Variante eines vorhandenen Gerichts (anders zubereitet, andere Zutaten) ist ein "
+            + "eigenes Rezept: get_recipe des Gerichts lesen, Zutaten und Schritte übernehmen und "
+            + "ändern, mit variant_of = dessen id und einem variant_label anlegen. Der Name muss "
+            + "sich unterscheiden, z. B. „Chicharrones (Airfryer)“. Nährwerte nicht ungeprüft "
+            + "übernehmen — sie gelten für die andere Variante.",
         inputSchema: object({ recipe: RECIPE_SCHEMA }, ["recipe"]),
         run: async ({ recipe }, user) => ({ recipe: await recipes.saveRecipe(user.id, null, recipe) }),
     },
@@ -218,7 +243,10 @@ const TOOLS = [
         name: "update_recipe",
         title: "Rezept ändern",
         description: "Ersetzt ein Rezept. Achtung: Zutaten und Schritte werden komplett ersetzt, "
-            + "nicht ergänzt — deshalb vorher get_recipe lesen und die ganze Liste mitschicken.",
+            + "nicht ergänzt — deshalb vorher get_recipe lesen und die ganze Liste mitschicken.\n\n"
+            + "variant_of und variant_label bleiben, wenn man sie weglässt. variant_of = null löst "
+            + "eine Variante aus ihrem Gericht. variant_of = id einer eigenen Variante macht diese "
+            + "zum neuen Grundrezept.",
         inputSchema: object({ id: integer("Die id des Rezepts."), recipe: RECIPE_SCHEMA }, ["id", "recipe"]),
         run: async ({ id, recipe }, user) => ({ recipe: await recipes.saveRecipe(user.id, id, recipe) }),
     },
@@ -226,7 +254,9 @@ const TOOLS = [
         name: "delete_recipe",
         title: "Rezept löschen",
         description: "Löscht ein Rezept samt Zutatenliste, Schritten und Bild. Das lässt sich "
-            + "nicht zurücknehmen — vorher beim Benutzer nachfragen.",
+            + "nicht zurücknehmen — vorher beim Benutzer nachfragen. Nur dieses eine Rezept: "
+            + "ist es das Grundrezept eines Gerichts, bleiben die Varianten, und die älteste wird "
+            + "das neue Grundrezept (new_base in der Antwort).",
         inputSchema: object({ id: integer("Die id des Rezepts.") }, ["id"]),
         run: ({ id }, user) => recipes.deleteRecipe(user.id, id),
     },

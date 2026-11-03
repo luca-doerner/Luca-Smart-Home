@@ -371,6 +371,57 @@ ALTER TABLE recipes ADD COLUMN IF NOT EXISTS nutrients JSONB;
 -- tags && ARRAY['vegetarisch'] uses this index instead of reading every recipe
 CREATE INDEX IF NOT EXISTS recipes_tags_idx ON recipes USING GIN (tags);
 
+-- Variants of one dish ("Chicharrones" from the oven, from the air fryer, ...). Every variant is a
+-- complete recipe of its own - ingredients, steps, nutrients, picture - so the shopping list,
+-- Bring! and YAZIO work for it without knowing about variants. What makes them one dish:
+--
+-- variant_of:    the base recipe of the dish ("Grundrezept"); NULL = this recipe is a base itself
+--                (or a dish with only one recipe). Only ONE level: a base is never a variant, see
+--                the trigger below. Deleting a base makes the oldest variant the new base
+--                (recipes.js, deleteRecipe); ON DELETE SET NULL is only the safety net.
+-- variant_label: short name of the variant for the tabs on the page, e.g. "Airfryer"; NULL = the
+--                page shows the name of the recipe
+ALTER TABLE recipes ADD COLUMN IF NOT EXISTS variant_of BIGINT REFERENCES recipes (id) ON DELETE SET NULL;
+ALTER TABLE recipes ADD COLUMN IF NOT EXISTS variant_label TEXT;
+
+CREATE INDEX IF NOT EXISTS recipes_variant_of_idx ON recipes (variant_of);
+
+-- Only one level of variants: the base of a variant must not be a variant itself, and a recipe that
+-- is a base (others point to it) cannot become a variant. One level is enough for "the same dish,
+-- made differently", and it means the dish of a recipe is always COALESCE(variant_of, id).
+--
+-- A CONSTRAINT TRIGGER that is DEFERRED: it is checked at COMMIT, not after every row. Changing the
+-- base of a dish takes several UPDATEs (recipes.js, setVariantOf), and in between the rule is
+-- broken for a moment. It reads the row again instead of using NEW, because NEW is the row as it
+-- was at the time of the UPDATE and may be outdated by the time of the COMMIT.
+CREATE OR REPLACE FUNCTION recipes_check_variant() RETURNS trigger AS $$
+DECLARE
+    v_variant_of BIGINT;
+BEGIN
+    SELECT variant_of INTO v_variant_of FROM recipes WHERE id = NEW.id;
+    IF v_variant_of IS NULL THEN
+        RETURN NULL;   -- the row is gone or is a base: nothing to check
+    END IF;
+    IF v_variant_of = NEW.id THEN
+        RAISE EXCEPTION 'Rezept % kann keine Variante von sich selbst sein', NEW.id;
+    END IF;
+    IF EXISTS (SELECT 1 FROM recipes WHERE id = v_variant_of AND variant_of IS NOT NULL) THEN
+        RAISE EXCEPTION 'Rezept % ist selbst eine Variante und kann kein Grundrezept sein', v_variant_of;
+    END IF;
+    IF EXISTS (SELECT 1 FROM recipes WHERE variant_of = NEW.id) THEN
+        RAISE EXCEPTION 'Rezept % hat eigene Varianten und kann keine Variante sein', NEW.id;
+    END IF;
+    RETURN NULL;
+END
+$$ LANGUAGE plpgsql;
+
+-- CREATE OR REPLACE does not exist for constraint triggers, hence DROP + CREATE
+DROP TRIGGER IF EXISTS recipes_one_variant_level ON recipes;
+CREATE CONSTRAINT TRIGGER recipes_one_variant_level
+    AFTER INSERT OR UPDATE OF variant_of ON recipes
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION recipes_check_variant();
+
 -- the ingredients of a recipe in their order
 --
 -- The primary key is (recipe_id, position) and not an id of its own: the order is part of what
@@ -552,7 +603,21 @@ BEGIN
       AND r.user_id IS NOT NULL AND i.user_id IS DISTINCT FROM r.user_id
       AND own.user_id = r.user_id AND lower(own.name) = lower(i.name);
 
-    -- only once nothing is left without an owner, otherwise the deploy would fail here
+    -- a dish belongs to one user (recipes.js, setVariantOf); a variant of somebody else's recipe
+    -- from before becomes a recipe of its own again
+    UPDATE recipes v SET variant_of = NULL
+    FROM recipes b
+    WHERE b.id = v.variant_of AND b.user_id IS DISTINCT FROM v.user_id;
+END
+$$;
+
+-- Only once nothing is left without an owner, otherwise the deploy would fail here.
+-- A DO block of its own and not the end of the one above: the variant trigger on recipes is
+-- DEFERRED, so the UPDATEs above leave "pending trigger events" until their transaction ends, and
+-- PostgreSQL refuses an ALTER TABLE on a table with pending events. psql runs every statement in
+-- its own transaction, so here they are already done.
+DO $$
+BEGIN
     IF NOT EXISTS (SELECT 1 FROM recipes WHERE user_id IS NULL) THEN
         ALTER TABLE recipes ALTER COLUMN user_id SET NOT NULL;
     END IF;

@@ -346,14 +346,30 @@ function readNutrients(fields) {
     return Object.fromEntries(fields.map((field, index) => [field.key, values[index]]));
 }
 
-// recipe: ein vorhandenes Rezept oder null für ein neues
-async function recipeForm(recipe, errors) {
+// Startwerte für eine neue Variante: eine Kopie des Rezepts, von dem aus sie angelegt wird — eine
+// Variante unterscheidet sich meist nur in ein paar Zeilen. Nicht kopiert werden die Nährwerte
+// (sie gelten für die andere Variante und landeten sonst ungeprüft in YAZIO) und das Bild (das
+// braucht eine id, die es vor dem Speichern noch nicht gibt).
+function variantStart(copy) {
+    return {
+        ...copy,
+        name: `${copy.name} (Variante)`,
+        nutrients: null,
+        variant_of: copy.dish_id,
+        variant_label: null,
+    };
+}
+
+// recipe: ein vorhandenes Rezept oder null für ein neues; copy: das Rezept, von dem eine neue
+// Variante ausgeht (nur bei einem neuen)
+async function recipeForm(recipe, errors, copy = null) {
     const isNew = recipe === null;
-    const start = recipe ?? {
+    const start = recipe ?? (copy ? variantStart(copy) : {
         name: "", description: null, servings: 4, prep_minutes: null, cook_minutes: null,
         difficulty: null, tags: [], source: null, notes: null, nutrients: null, ingredients: [], steps: [],
-    };
-    const names = await ingredientList();
+        variant_of: null, variant_label: null,
+    });
+    const [names, { dishes }] = await Promise.all([ingredientList(), api("/api/recipes/dishes")]);
     const datalistId = "zutaten-vorschlaege";
 
     const status = el("p", { class: "form-status muted", role: "status" });
@@ -372,20 +388,41 @@ async function recipeForm(recipe, errors) {
     const tags = textInput("recipe-tags", start.tags.join(", "), { maxlength: 500, placeholder: "Hauptgericht, vegetarisch" });
     const source = textInput("recipe-source", start.source, { maxlength: 500 });
     const notes = areaInput("recipe-notes", start.notes, 3);
+    // Varianten: zur Auswahl stehen nur Grundrezepte (der Server löst ohnehin jede Variante zu
+    // ihrem Gericht auf), das eigene nicht — ein Rezept kann keine Variante von sich selbst sein
+    const variantOf = el("select", { id: "recipe-variant-of" },
+        el("option", { value: "" }, "— eigenständiges Gericht —"),
+        dishes.filter((dish) => dish.id !== recipe?.id).map((dish) => el("option", {
+            value: dish.id, selected: start.variant_of === dish.id,
+        }, dish.variant_count > 1 ? `${dish.name} (${dish.variant_count} Varianten)` : dish.name)));
+    const variantLabel = textInput("recipe-variant-label", start.variant_label,
+        { maxlength: 60, placeholder: "z. B. Ofen, Airfryer, vegetarisch" });
+    // ein Grundrezept mit Varianten nimmt sie mit, wenn es selbst Variante eines anderen wird
+    const ownVariants = (recipe?.variants ?? []).filter((entry) => entry.id !== recipe.id);
+    const variantHint = recipe?.variant_of === null && ownVariants.length > 0
+        ? `Dieses Rezept ist das Grundrezept von ${plural(ownVariants.length, "Variante", "Varianten")}. `
+          + "Wählst du hier ein anderes Gericht, kommen sie mit."
+        : "Eine Variante ist ein eigenes Rezept mit eigenen Zutaten und Schritten; auf der Seite "
+          + "stehen alle Varianten eines Gerichts als Reiter nebeneinander.";
     // die vier Felder gehören zusammen: alle leer = keine Nährwerte, sonst müssen alle da sein
     const nutrients = NUTRIENT_FIELDS.map(({ key, id, step }) =>
         ({ key, id, ...numberInput(id, start.nutrients?.[key], { min: 0, max: 100000, step })}));
 
     const ingredients = ingredientRows(start.ingredients, datalistId, touched);
     const steps = stepRows(start.steps, touched);
-    for (const control of [name, description, servings, prep, cook, tags, source, notes, ...nutrients])
+    for (const control of [name, description, servings, prep, cook, tags, source, notes, variantLabel, ...nutrients])
         control.input.addEventListener("input", touched);
     difficulty.addEventListener("change", touched);
+    variantOf.addEventListener("change", touched);
 
     const form = el("form", { class: "card settings-form" },
-        el("h3", {}, isNew ? "Neues Rezept" : "Rezept bearbeiten"),
+        el("h3", {}, isNew ? (copy ? "Neue Variante" : "Neues Rezept") : "Rezept bearbeiten"),
         ingredientDatalist(datalistId, names),
-        field("recipe-name", "Name", name.node),
+        field("recipe-name", "Name", name.node, copy ? "Jeden Namen gibt es nur einmal, z. B. „Chicharrones (Airfryer)“." : null),
+        el("div", { class: "form-row" },
+            field("recipe-variant-of", "Variante von", variantOf),
+            field("recipe-variant-label", "Name der Variante", variantLabel.node)),
+        el("p", { class: "muted form-description" }, variantHint),
         field("recipe-description", "Beschreibung", description.node),
         el("div", { class: "form-row" },
             field("recipe-servings", "Portionen", servings.node),
@@ -422,6 +459,9 @@ async function recipeForm(recipe, errors) {
         source: source.read(),
         notes: notes.read(),
         nutrients: readNutrients(nutrients),
+        // immer mitgeschickt: die Seite speichert, was im Formular steht (null = eigenständig)
+        variant_of: variantOf.value ? Number(variantOf.value) : null,
+        variant_label: variantLabel.read(),
         ingredients: ingredients.read(),
         steps: steps.read(),
     });
@@ -626,8 +666,11 @@ function deleteButton(recipe, errors) {
         }
         button.disabled = true;
         try {
-            await api(`/api/recipes/${recipe.id}/delete`, {});
-            location.assign("/recipes");
+            const result = await api(`/api/recipes/${recipe.id}/delete`, {});
+            // war es eine Variante, geht es zurück zu ihrem Gericht; war es das Grundrezept, zum
+            // neuen Grundrezept, das der Server bestimmt hat
+            const next = result.new_base?.id ?? (recipe.dish_id !== recipe.id ? recipe.dish_id : null);
+            location.assign(next ? `/recipes/${next}` : "/recipes");
         } catch (err) {
             armed = false;
             button.disabled = false;
@@ -693,6 +736,21 @@ function yazioBox(recipe, errors) {
         form);
 }
 
+// Reiter für die Varianten eines Gerichts. Echte Links statt Tabs im selben Dokument: jede
+// Variante ist ein eigenes Rezept mit eigener Adresse, Zurück im Browser und Teilen gehen so von
+// selbst. Gibt es keine Varianten, gibt es auch keine Leiste.
+function variantTabs(recipe) {
+    if (recipe.variants.length === 0)
+        return null;
+    return el("nav", { class: "button-select variant-tabs", "aria-label": "Varianten" },
+        recipe.variants.map((variant) => el("a", {
+            class: "choice",
+            href: `/recipes/${variant.id}`,
+            "aria-current": variant.id === recipe.id ? "page" : undefined,
+            title: variant.is_base ? "Grundrezept" : undefined,
+        }, variant.variant_label ?? variant.name)));
+}
+
 export async function renderRecipePage(id) {
     const errors = errorBox();
     const { recipe } = await api(`/api/recipes/${id}`);
@@ -716,7 +774,9 @@ export async function renderRecipePage(id) {
             el("div", { class: "header-actions" },
                 shopping.button,
                 el("a", { class: "button", href: `/recipes/${recipe.id}?edit=1` }, icon("pencil"), "Bearbeiten"),
+                el("a", { class: "button", href: `/recipes/new?from=${recipe.id}` }, icon("copy"), "Variante anlegen"),
                 deleteButton(recipe, errors))),
+        variantTabs(recipe),
         errors.node,
         recipe.has_image
             ? el("img", { src: imageUrl(recipe), alt: `Bild von ${recipe.name}`, class: "recipe-image" })
@@ -735,12 +795,16 @@ export async function renderRecipePage(id) {
             recipe.source ? el("p", { class: "muted" }, `Quelle: ${recipe.source}`) : null) : null);
 }
 
-// Bearbeiten: /recipes/:id?edit=1, und /recipes/new für ein neues Rezept
+// Bearbeiten: /recipes/:id?edit=1, /recipes/new für ein neues Rezept und /recipes/new?from=:id für
+// eine neue Variante (vorausgefüllt mit einer Kopie von :id)
 export async function renderRecipeEditPage(id) {
     const errors = errorBox();
     const recipe = id === null ? null : (await api(`/api/recipes/${id}`)).recipe;
-    document.title = `${recipe ? recipe.name : "Neues Rezept"} · Smart Home`;
-    const form = await recipeForm(recipe, errors);
+    const from = id === null ? Number(new URLSearchParams(location.search).get("from")) : 0;
+    const copy = from > 0 ? (await api(`/api/recipes/${from}`)).recipe : null;
+    const title = recipe ? recipe.name : copy ? `Neue Variante von ${copy.name}` : "Neues Rezept";
+    document.title = `${title} · Smart Home`;
+    const form = await recipeForm(recipe, errors, copy);
 
     form.form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -764,12 +828,14 @@ export async function renderRecipeEditPage(id) {
         breadcrumb([
             { label: "Rezepte", href: "/recipes" },
             ...(recipe ? [{ label: recipe.name, href: `/recipes/${recipe.id}` }] : []),
-            { label: recipe ? "Bearbeiten" : "Neu" },
+            ...(copy ? [{ label: copy.name, href: `/recipes/${copy.id}` }] : []),
+            { label: recipe ? "Bearbeiten" : copy ? "Neue Variante" : "Neu" },
         ]),
         el("div", { class: "page-header" },
-            el("h1", {}, recipe ? recipe.name : "Neues Rezept"),
+            el("h1", {}, title),
             el("div", { class: "header-actions" },
-                el("a", { class: "button", href: recipe ? `/recipes/${recipe.id}` : "/recipes" }, "Abbrechen"))),
+                el("a", { class: "button", href: recipe ? `/recipes/${recipe.id}` : copy ? `/recipes/${copy.id}` : "/recipes" },
+                    "Abbrechen"))),
         errors.node,
         form.node,
         // ein Bild braucht eine id, die es vor dem ersten Speichern noch nicht gibt
@@ -791,6 +857,9 @@ function recipeCard(recipe) {
                 recipe.total_minutes ? `${recipe.total_minutes} min` : null,
             ].filter(Boolean).join(" · ")),
             recipe.description ? el("p", { class: "recipe-card-text" }, recipe.description) : null,
+            recipe.variant_count > 1
+                ? el("p", {}, el("span", { class: "badge" }, plural(recipe.variant_count, "Variante", "Varianten")))
+                : null,
             recipe.tags.length > 0
                 ? el("p", { class: "tag-row" }, recipe.tags.map((tag) => el("span", { class: "badge" }, tag)))
                 : null));
@@ -830,8 +899,12 @@ export async function renderRecipesPage() {
             url.searchParams.set("tag", activeTag);
         try {
             const { recipes } = await api(url.pathname + url.search);
-            count.textContent = recipes.length === 0 ? "" : plural(recipes.length, "Rezept", "Rezepte");
-            results.replaceChildren(cardGrid(recipes.map(recipeCard),
+            // eine Karte pro Gericht: der beste Treffer steht vorne (die Suche sortiert nach
+            // Rang), also gewinnt er; die anderen Varianten sind auf seiner Seite als Reiter
+            const seen = new Set();
+            const dishes = recipes.filter((recipe) => !seen.has(recipe.dish_id) && seen.add(recipe.dish_id));
+            count.textContent = dishes.length === 0 ? "" : plural(dishes.length, "Gericht", "Gerichte");
+            results.replaceChildren(cardGrid(dishes.map(recipeCard),
                 query || activeTag ? "Dazu gibt es kein Rezept." : "Noch kein Rezept angelegt."));
             errors.show("search", "");
         } catch (err) {

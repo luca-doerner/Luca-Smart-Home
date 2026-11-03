@@ -77,6 +77,14 @@ dazu `pantry_items` und die View `recipes_search`.
   vier Zahlen, keine negativ) steht am Dateiende und wird bei jedem Lauf neu angelegt; ein
   CHECK darf keine Unterabfrage haben, „keine anderen Schlüssel“ ist deshalb
   `nutrients - 'kcal' - … = '{}'`.
+- **Varianten eines Gerichts** („Chicharrones“ aus Ofen/Airfryer): `recipes.variant_of` zeigt auf
+  das Grundrezept, `variant_label` ist der kurze Name für die Reiter. Jede Variante ist ein
+  **vollständiges eigenes Rezept** (Zutaten, Schritte, Nährwerte, Bild) — Einkaufsliste, Bring!
+  und YAZIO wissen deshalb nichts von Varianten. **Nur eine Ebene**, das Gericht eines Rezepts ist
+  immer `COALESCE(variant_of, id)`. Garantiert vom `CONSTRAINT TRIGGER recipes_one_variant_level`,
+  `DEFERRABLE INITIALLY DEFERRED`: er prüft erst beim COMMIT, weil das Wechseln des Grundrezepts
+  mehrere UPDATEs braucht. `CREATE OR REPLACE` gibt es für Constraint-Trigger nicht, deshalb
+  `DROP TRIGGER IF EXISTS` + `CREATE`.
 - `yazio_accounts` ist wie `bring_accounts` gebaut (Benutzer, E-Mail, `credentials` =
   verschlüsselter `refresh_token`), nur ohne Standardliste.
 
@@ -221,7 +229,8 @@ Kein Framework, nur `http`/`dgram`/`child_process` + `pg`.
 
 Routen: `/api/health` (ohne Login, für den Deploy), `/api/login|logout|me`, `/api/navigation`,
 `/api/rooms/:id`, `/api/devices/:id` (+`/settings`, `/pinned`), `/api/features/:id`
-(+`/state`, `/active`, `/settings`), `/api/log`; dazu `/api/recipes` (+`/:id`, `/:id/delete`,
+(+`/state`, `/active`, `/settings`), `/api/log`; dazu `/api/recipes` (+`/dishes` (Grundrezepte für
+die Auswahl „Variante von“), `/:id`, `/:id/delete`,
 `/:id/ingredients`, `/:id/shopping-list`, `/:id/image` (+`/delete`)), `/api/ingredients`,
 `/api/tags`, `/api/pantry` (+`/:ingredientId/delete`) und `/api/mcp`; dazu
 `POST /api/recipes/:id/bring` (Knopf „An Bring! senden“), `/api/bring` (+`/lists`, `/login`,
@@ -232,7 +241,8 @@ Tagebuch) und die OAuth-Routen:
 `/.well-known/oauth-protected-resource` (+`/api/mcp`), `/.well-known/oauth-authorization-server`,
 `POST /oauth/register`, `POST /oauth/token`, `/oauth/authorize` (Freigabe-Seite),
 `/api/oauth/client`, `POST /api/oauth/authorize`.
-Seiten: `/rooms`, `/rooms/:id`, `/devices/:id`, `/recipes`, `/recipes/new`, `/recipes/:id`
+Seiten: `/rooms`, `/rooms/:id`, `/devices/:id`, `/recipes`, `/recipes/new` (`?from=:id` = neue
+Variante), `/recipes/:id`
 (`?edit=1` zum Bearbeiten), `/pantry`, `/nutrition` (`?date=JJJJ-MM-TT`), `/account` (`account.js`), `/oauth/authorize` (`consent.html` + `consent.js`).
 
 Umgebung: `PORT` (5000), `HOST`, `PG*`, `UDP_HOST` (127.0.0.1),
@@ -307,6 +317,17 @@ Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
   Alternativen nicht), deshalb steht es in den Beschreibungen.
   Die Seite zeigt **nicht** `note` (das ist für den Agenten geschrieben), sondern einen eigenen
   Satz.
+- **Varianten** (`variant_of`, `variant_label`): beim Speichern drei Zustände wie die Nährwerte
+  (`undefined` = bleibt, `null` = eigenständig, id = Variante). `setVariantOf` baut um statt
+  abzulehnen, damit jede Angabe ein gültiges Gericht ergibt: id einer Variante → deren Gericht;
+  ein Grundrezept mit Varianten nimmt sie mit; id einer **eigenen** Variante → die wird das neue
+  Grundrezept; `null` löst nur eine Variante heraus (ein Grundrezept bleibt Grundrezept).
+  Löschen eines Grundrezepts macht die älteste Variante zum neuen (`new_base` in der Antwort).
+  `getRecipe` liefert `dish_id` und `variants` (leer ohne Varianten), die Suche `dish_id` und
+  `variant_count` (1 = keine). Die Rezeptliste zeigt eine Karte pro Gericht (bester Treffer),
+  die Rezeptseite die Varianten als Reiter (echte Links). „Variante anlegen“
+  (`/recipes/new?from=:id`) kopiert das Rezept **ohne Nährwerte und Bild** — die gälten für die
+  andere Variante und landeten sonst ungeprüft in YAZIO.
 - Mehrere Rezepte werden zusammengefasst: gleiche Zutat und gleiche Einheit werden addiert, eine
   Zutat ohne Menge („Butter zum Braten“) wird in den vorhandenen Eintrag eingehängt.
 - **Nährwerte** (`recipes.nutrients`) sind drei Zustände: nicht mitgeschickt (`undefined`: beim
