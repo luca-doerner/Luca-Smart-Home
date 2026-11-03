@@ -517,7 +517,10 @@ function choicesBlock(choices, onChange) {
                     onChange();
                 },
             }),
-            option.spec ? `${option.name} (${option.spec})` : option.name))));
+            // ein span, damit Name und Vorratshinweis als ein Text umbrechen (label ist ein Flex-Container)
+            el("span", {}, option.spec ? `${option.name} (${option.spec})` : option.name,
+                // ein Teil davon ist schon da: dann steht hier nur die fehlende Menge
+                option.in_pantry ? el("span", { class: "muted" }, ` — ${option.in_pantry}`) : null)))));
     return { nodes, chosen: () => (selected.every(Boolean) ? [...selected] : null) };
 }
 
@@ -538,11 +541,14 @@ function shoppingListBox(recipe, errors) {
             const bring = bringButton(recipe, list.servings, errors, block.chosen);
             result.replaceChildren(
                 el("h4", {}, `Einkaufen für ${plural(list.servings, "Portion", "Portionen")}`),
-                list.items.length === 0 && list.choices.length === 0
-                    ? el("p", { class: "empty" }, "Alles schon da.")
-                    : el("ul", { class: "ingredient-list" }, list.items.map((item) => el("li", {},
+                ...(list.items.length === 0 && list.choices.length === 0
+                    ? [el("p", { class: "empty" }, "Alles schon da.")] : []),
+                // nur Alternativen und sonst nichts: keine leere Liste davor
+                ...(list.items.length === 0 ? [] : [
+                    el("ul", { class: "ingredient-list" }, list.items.map((item) => el("li", {},
                         el("span", { class: "ingredient-amount-text" }, item.spec),
                         el("span", {}, item.name)))),
+                ]),
                 ...block.nodes,
                 ...(list.from_pantry.length === 0 ? [] : [
                     el("h4", {}, "Aus dem Vorrat"),
@@ -550,7 +556,12 @@ function shoppingListBox(recipe, errors) {
                         el("span", { class: "ingredient-amount-text" }, item.needed),
                         el("span", {}, item.name, el("span", { class: "muted" }, ` — ${item.reason}`))))),
                 ]),
-                el("p", { class: "muted hint" }, list.note),
+                // list.note ist für den KI-Agenten geschrieben („nenne sie in der Antwort“,
+                // „stehen NICHT in items“) — hier steht dasselbe für Menschen
+                el("p", { class: "muted hint" }, [
+                    list.from_pantry.length === 0 ? null : "Was aus dem Vorrat kommt, steht nicht auf der Liste.",
+                    list.choices.length === 0 ? null : "Bei „Entweder oder“ kommt nur die Zutat auf die Liste, die du wählst.",
+                ].filter(Boolean).join(" ")),
                 ...(list.items.length + list.choices.length === 0 ? [] : [bring]));
             errors.show("shopping", "");
         } catch (err) {

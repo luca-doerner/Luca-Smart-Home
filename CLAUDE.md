@@ -267,18 +267,28 @@ Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
   `recipe_ingredients.alternative_group` — gleicher Text im selben Rezept heißt „eine davon
   genügt“. Sie stehen **nicht** in `items`, sondern in `choices` (`{ question, options: [{ name,
   spec }] }`, in der Antwort Pflicht wie `from_pantry`); die `note` sagt dem Agenten, dass er
-  nachfragen und nur die gewählte eintragen soll. Auch ein einzelner Name „A oder B“ wird
-  automatisch so zerlegt (so schreiben es Rezepte und KIs gern). Dasselbe gilt für „oder X“ im
-  **Hinweis** einer Zutat (`alternativeInNote`): beim Speichern wird das **abgelehnt** mit einer
-  Anleitung (die KI liest die Meldung und legt es richtig an — nur Prompt-Text hat nicht
-  gereicht), und ältere Rezepte, die es schon so tragen, werden beim Einkaufen trotzdem als
-  Wahl erkannt. Am Anfang des Hinweises zählt jedes Wort nach „oder/bzw./alternativ“, mitten
-  im Text nur ein groß geschriebenes (Hauptwort): „fein gewürfelt oder gerieben“ bleibt
-  erlaubt. Reicht der Vorrat für eine
-  Option, entfällt die Wahl (steht in `from_pantry`). `POST /api/recipes/:id/bring` nimmt
-  `choices: [Name, …]` und verlangt genau eine Option je Alternative, sonst `400` — die Seite
-  schaltet den Knopf erst nach der Wahl frei. Das MCP-Werkzeug `bring_add_items` kann das nicht
-  erzwingen (es kennt die Alternativen nicht), deshalb steht es in den Beschreibungen.
+  nachfragen und nur die gewählte eintragen soll.
+  **Beim Speichern abgelehnt** (mit einer Anleitung in der Meldung — die KI liest sie und legt
+  es richtig an, nur Prompt-Text hat nicht gereicht): ein Name „A oder B“, „oder X“ im
+  **Hinweis** einer Zutat (`alternativeInNote`) und eine `alternative_group`, die nur eine Zutat
+  hat (Tippfehler „Schärfe“/„Schaerfe“; Groß/klein zählt nicht). Ältere Rezepte, die so etwas
+  schon tragen, erkennt `planShoppingList` trotzdem als Wahl; steht die im Hinweis genannte
+  Zutat zusätzlich als eigene Zeile da, ist diese Zeile die zweite Option (mit ihrer Menge).
+  `alternativeInNote` ist absichtlich eng, weil ein Fehlalarm ein richtiges Rezept ablehnt: am
+  Anfang muss nach „oder/bzw./alternativ/ersatzweise“ ein Hauptwort folgen und das erste Wort
+  darf keins aus `NOT_AN_ALTERNATIVE` sein („oder mehr nach Geschmack“); mitten im Text muss
+  direkt danach ein Hauptwort stehen und davor keins („frisch oder TK“, „z. B. Gouda oder
+  Emmentaler“ beim Käse sind keine Alternativen). Hauptwort = groß, dann klein (`NOUN`).
+  Dieselbe Wahl aus mehreren Rezepten wird **eine** Frage mit addierten Mengen; braucht ein
+  anderes Rezept eine Option fest, entfällt die Frage und die Menge kommt dazu. Reicht der
+  Vorrat für eine Option, entfällt die Wahl (steht in `from_pantry`); reicht er nur zum Teil,
+  trägt die Option `in_pantry` (`spec` ist dann der Rest). `POST /api/recipes/:id/bring` nimmt
+  `choices: [Name, …]` und verlangt genau eine Option je Alternative, sonst `400` (eine Wahl
+  darf für zwei Fragen gelten, die dieselbe Option haben) — die Seite schaltet den Knopf erst
+  nach der Wahl frei. Das MCP-Werkzeug `bring_add_items` kann das nicht erzwingen (es kennt die
+  Alternativen nicht), deshalb steht es in den Beschreibungen.
+  Die Seite zeigt **nicht** `note` (das ist für den Agenten geschrieben), sondern einen eigenen
+  Satz.
 - Mehrere Rezepte werden zusammengefasst: gleiche Zutat und gleiche Einheit werden addiert, eine
   Zutat ohne Menge („Butter zum Braten“) wird in den vorhandenen Eintrag eingehängt.
 
@@ -343,7 +353,9 @@ erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` dir
   `plan_shopping_list` ist die Vorschau, `bring_add_items` der einzige schreibende Aufruf; die
   Werkzeugbeschreibung verlangt erst das Ja des Benutzers. Was schon auf der Liste steht (gleicher
   Name), wird **nicht** überschrieben, sondern als `already_on_list` gemeldet — Bring! würde sonst
-  die Menge eines fremden Eintrags ersetzen. Bei mehreren Listen wird nicht geraten (geteilte
+  die Menge eines fremden Eintrags ersetzen. Derselbe Name zweimal in einem Aufruf (500 g und
+  2 Packungen) wird vorher zu einem Eintrag „500 g + 2 Packungen“ (`mergeSameName`), denn
+  Bring! kennt je Name nur einen. Bei mehreren Listen wird nicht geraten (geteilte
   Liste): ohne `list` und ohne Standardliste (auf der Seite „Konto“ gewählt) kommt ein Fehler
   mit den Namen.
 

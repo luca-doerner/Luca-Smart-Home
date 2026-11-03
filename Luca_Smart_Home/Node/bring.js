@@ -316,7 +316,19 @@ function normalizeItems(items) {
         if (spec.length > 200)
             throw new HttpError(400, `items[${index}].spec ist zu lang`);
         return { name, spec };
-    });
+    }).reduce(mergeSameName, []);
+}
+
+// Bring! hat je Name genau einen Eintrag. Kommt derselbe Name zweimal (500 g und 2 Packungen
+// lassen sich nicht addieren; oder dieselbe Wahl in zwei Alternativen mit TL und EL), wird daraus
+// ein Eintrag „500 g + 2 Packungen“ — sonst ginge der zweite verloren bzw. hieße fälschlich
+// „stand schon auf der Liste“.
+function mergeSameName(merged, entry) {
+    const same = merged.find((other) => other.name.toLowerCase() === entry.name.toLowerCase());
+    if (!same)
+        return [...merged, entry];
+    same.spec = [same.spec, entry.spec].filter(Boolean).join(" + ").slice(0, 200);
+    return merged;
 }
 
 // Trägt Einträge als „zu kaufen“ ein. Was schon auf der Liste steht (gleicher Name, Groß- und
@@ -333,10 +345,8 @@ async function addItems(userId, items, list) {
     for (const entry of wanted) {
         if (have.has(entry.name.toLowerCase()))
             skipped.push(entry);
-        else {
-            have.add(entry.name.toLowerCase());   // zweimal derselbe Name in einem Aufruf
-            toAdd.push(entry);
-        }
+        else
+            toAdd.push(entry);   // gleiche Namen hat normalizeItems schon zusammengefasst
     }
 
     if (toAdd.length > 0) {
@@ -361,8 +371,8 @@ async function addItems(userId, items, list) {
         note: (toAdd.length === 1 ? `1 Eintrag in „${target.name}“ eingetragen.`
                                   : `${toAdd.length} Einträge in „${target.name}“ eingetragen.`)
             + (skipped.length === 0 ? ""
-                : ` ${skipped.length} davon standen schon auf der Liste und wurden nicht angefasst — `
-                  + "bitte dem Benutzer nennen."),
+                : ` ${skipped.length} weitere standen schon auf der Liste und wurden nicht angefasst `
+                  + "(already_on_list) — bitte dem Benutzer nennen."),
     };
 }
 
@@ -379,15 +389,18 @@ async function sendRecipes(userId, recipeIds, servings, list, chosen = []) {
         throw new HttpError(400, "choices muss eine Liste von Namen sein");
     const picked = new Set(chosen.map((name) => name.trim().toLowerCase()));
 
+    // erst am Ende prüfen, ob etwas übrig ist: zwei Alternativen können dieselbe Option haben,
+    // dann zählt eine Wahl für beide
     const items = [...plan.items];
+    const offered = new Set();
     for (const choice of plan.choices) {
         const selected = choice.options.filter((option) => picked.has(option.name.toLowerCase()));
         if (selected.length !== 1)
             throw new HttpError(400, `Bitte genau eine wählen: ${choice.question}`);
-        items.push(selected[0]);
-        selected.forEach((option) => picked.delete(option.name.toLowerCase()));
+        items.push({ name: selected[0].name, spec: selected[0].spec });   // ohne in_pantry
+        choice.options.forEach((option) => offered.add(option.name.toLowerCase()));
     }
-    if (picked.size > 0)
+    if ([...picked].some((name) => !offered.has(name)))
         throw new HttpError(400, "Die Auswahl passt nicht zu den Alternativen des Rezepts");
 
     if (items.length === 0)

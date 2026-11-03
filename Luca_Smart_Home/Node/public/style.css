@@ -1457,10 +1457,16 @@ fieldset.choice {
     display: flex;
     flex-wrap: wrap;
     gap: 6px 16px;
+    min-width: 0;            /* ein fieldset ist sonst mindestens so breit wie sein Inhalt (375 px!) */
     margin: 12px 0;
     padding: 8px 12px;
     border: 1px solid var(--border);
     border-radius: 8px;
+}
+
+/* „Chipotle Pulver (0,5 TL) — 0,5 TL vorrätig, 0,5 TL fehlen“ darf umbrechen */
+fieldset.choice .inline-check {
+    white-space: normal;
 }
 
 fieldset.choice legend {

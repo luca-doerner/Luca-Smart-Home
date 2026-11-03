@@ -123,17 +123,47 @@ function normalizeTags(value) {
     return [...tags.values()];
 }
 
+// Schreibweisen desselben Namens gleich behandeln: „Chipotle-Pulver“ = „chipotle pulver“
+const nameKey = (name) => name.toLowerCase().replace(/[\s-]+/g, " ").trim();
+
+// ein Hauptwort: groß, danach klein. „TK“, „EL“ oder „z. B.“ sind keins.
+const NOUN = /[A-ZÄÖÜ][a-zäöüß]/;
+
+// Wörter, mit denen nach „oder“ keine andere Zutat anfängt, sondern eine Menge oder Form:
+// „oder mehr nach Geschmack“, „oder nach Belieben“, „oder aus der Dose“
+const NOT_AN_ALTERNATIVE = new Set(["mehr", "weniger", "nach", "je", "etwas", "ganz", "nur", "aus",
+    "in", "im", "mit", "ohne", "vom", "von", "zum", "zur", "als", "wie", "so", "bis", "halb", "doppelt"]);
+
 // „oder Chipotle Pulver“ im Hinweis einer Zutat: so schreibt man eine Alternative, wenn man das
 // Feld alternative_group nicht benutzt (eine KI tut das gern). Gibt den Namen der Alternative
-// zurück oder null. Am Anfang des Hinweises zählt jedes Wort; mitten im Text nur ein groß
-// geschriebenes (ein Hauptwort), damit „fein gewürfelt oder gerieben“ keine Alternative ist.
+// zurück oder null.
+//
+// Eine falsche Erkennung lehnt beim Speichern ein richtiges Rezept ab — deshalb eng:
+// - am Anfang („oder getrockneter Oregano“): es muss ein Hauptwort folgen, und das erste Wort
+//   darf keins aus NOT_AN_ALTERNATIVE sein („oder mehr nach Geschmack“ ist keine Alternative)
+// - mitten im Text: das Wort direkt nach „oder“ muss ein Hauptwort sein („fein gewürfelt oder
+//   gerieben“ und „frisch oder TK“ sind keine), und davor darf keins stehen — „z. B. Gouda oder
+//   Emmentaler“ beim Käse beschreibt den Käse, statt eine andere Zutat anzubieten
 function alternativeInNote(note) {
     if (!note)
         return null;
-    const atStart = note.match(/^\s*(?:oder|bzw\.?|alternativ(?:e|ly)?:?)\s+([^,;()]+)/i);
-    const inside = note.match(/\b(?:oder|bzw\.?)\s+([A-ZÄÖÜ][^,;()]*)/);
-    return (atStart ?? inside)?.[1].trim() || null;
+    const atStart = note.match(/^\s*(?:oder|bzw\.?|alternativ(?:e|ly)?:?|ersatzweise)\s+(?:auch\s+)?([^,;()]+)/i);
+    if (atStart) {
+        const phrase = atStart[1].trim();
+        const first = phrase.split(/\s+/)[0].toLowerCase();
+        return NOUN.test(phrase) && !NOT_AN_ALTERNATIVE.has(first) ? phrase : null;
+    }
+    const inside = note.match(/^(.*?)\s(?:oder|bzw\.?|alternativ:?|ersatzweise)\s+(?:auch\s+)?([A-ZÄÖÜ][^,;()]*)/);
+    if (inside && NOUN.test(inside[2]) && !NOUN.test(inside[1]))
+        return inside[2].trim();
+    return null;
 }
+
+// „Chiliflocken oder Chipotle Pulver“ als ein einziger Name -> ["Chiliflocken", "Chipotle Pulver"]
+const namedAlternatives = (name) => name.split(/\s+oder\s+/i).map((part) => part.trim()).filter(Boolean);
+
+// so heißt das Feld auf der Seite und im MCP-Schema — die Meldung muss für beide passen
+const GROUP_FIELD = "„Entweder/oder“ (alternative_group)";
 
 // eine Zeile der Zutatenliste eines Rezepts
 function normalizeIngredient(entry, index) {
@@ -156,7 +186,14 @@ function normalizeIngredient(entry, index) {
         fail(`${where}: Der Hinweis „${normalized.note}“ nennt eine Alternative. Alternativen gehören `
             + `nicht in den Hinweis, sonst werden beide eingekauft: lege „${alternative}“ als eigene Zutat `
             + `an (mit derselben Menge und Einheit) und gib beiden Zutaten denselben Text in `
-            + "alternative_group, z. B. „Schärfe“.");
+            + `${GROUP_FIELD}, z. B. „Schärfe“.`);
+    // dasselbe für „A oder B“ als Name: im Katalog stünde sonst eine Zutat „Chiliflocken oder
+    // Chipotle Pulver“, die der Vorrat nie findet
+    const parts = namedAlternatives(normalized.name);
+    if (parts.length > 1)
+        fail(`${where}: „${normalized.name}“ sind ${parts.length} Zutaten zur Auswahl, nicht eine. `
+            + `Lege ${parts.map((part) => `„${part}“`).join(", ")} als eigene Zutaten an und gib ihnen `
+            + `denselben Text in ${GROUP_FIELD}, z. B. „Schärfe“.`);
     return normalized;
 }
 
@@ -204,6 +241,17 @@ function normalizeRecipe(input) {
             fail(`Die Zutat „${ingredient.name}“ steht zweimal in der Liste`);
         seen.add(key);
     }
+    // eine Alternative allein ist keine Wahl — meist ein Tippfehler („Schärfe“ / „Schaerfe“)
+    // oder die zweite Zutat fehlt. Groß/klein zählt nicht, genau wie in planShoppingList.
+    const groupSizes = new Map();
+    for (const { alternative_group: group } of ingredients)
+        if (group)
+            groupSizes.set(group.toLowerCase(), (groupSizes.get(group.toLowerCase()) ?? 0) + 1);
+    const lonely = ingredients.find((entry) => groupSizes.get(entry.alternative_group?.toLowerCase()) === 1);
+    if (lonely)
+        fail(`Die Zutat „${lonely.name}“ ist die einzige mit ${GROUP_FIELD} „${lonely.alternative_group}“. `
+            + "Eine Alternative braucht mindestens zwei Zutaten mit demselben Text (Groß-/Kleinschreibung "
+            + "egal); sonst das Feld leer lassen.");
 
     return {
         name: requiredText(input.name, "Name"),
@@ -520,6 +568,8 @@ function formatAmount(amount) {
  *               saveItem(listUuid, itemName, specification) braucht: { name, spec }
  *   from_pantry was aus dem Vorrat kommt und deshalb nicht auf der Liste steht; das muss der
  *               Agent dem Benutzer trotzdem nennen, sonst fehlt am Ende etwas
+ *   choices     Alternativen („A oder B“): { question, options: [{ name, spec, in_pantry? }] }.
+ *               Stehen NICHT in items — der Benutzer wählt je Frage genau eine Option
  *   note        der Satz, der genau daran erinnert
  *
  * Die Regel ist bewusst eine einzige: eine Zutat, die im Vorrat steht, kommt nicht auf die
@@ -537,64 +587,104 @@ async function planShoppingList(recipeIds, servings) {
     // ohne Menge („Butter zum Braten“) bringt keine Menge mit und wird deshalb in einen
     // vorhandenen Eintrag derselben Zutat eingehängt, statt eine zweite Zeile zu erzeugen.
     const unitKey = (unit) => (unit ?? "").toLowerCase();
+    // zwei Mengen derselben Zutat passen zusammen, wenn eine keine Menge hat oder die Einheit gleich ist
+    const fits = (a, b) => a.amount === null || b.amount === null || unitKey(a.unit) === unitKey(b.unit);
+    // b in a einrechnen (a wird verändert)
+    function combine(a, b) {
+        if (a.amount === null) {
+            a.amount = b.amount;
+            a.unit ??= b.unit;
+        } else if (b.amount !== null) {
+            a.amount = Number((a.amount + b.amount).toFixed(3));
+        }
+        a.note ??= b.note;
+    }
     const needed = new Map();   // name (klein) -> [{ name, unit, amount, note }]
-    const groups = new Map();   // "<rezept>:<gruppe>" -> [Zutaten, von denen eine genügt]
+    // existing: nur in einen vorhandenen Eintrag einrechnen, keinen neuen anlegen (false = ging nicht)
+    function addNeeded(entry, existing = false) {
+        const entries = needed.get(entry.name.toLowerCase()) ?? [];
+        const found = entry.amount === null ? entries[0] : entries.find((other) => fits(other, entry));
+        if (found)
+            combine(found, entry);
+        else if (existing)
+            return false;
+        else
+            needed.set(entry.name.toLowerCase(), [...entries, { name: entry.name, unit: entry.unit, amount: entry.amount, note: entry.note }]);
+        return true;
+    }
+
+    // Alternativen („entweder Chiliflocken oder Chipotle-Pulver“) werden nie einfach auf die Liste
+    // gesetzt: sie sind eine Wahl. Dieselbe Wahl aus mehreren Rezepten wird eine Frage, die
+    // Mengen werden je Option addiert — wie bei normalen Zutaten und nur, wenn die Einheiten passen.
+    const groups = new Map();   // Namen der Optionen -> [Zutaten, von denen eine genügt]
+    function addGroup(options) {
+        const copies = options.map(({ name, unit, amount, note }) => ({ name, unit, amount, note }));
+        const key = copies.map((option) => nameKey(option.name)).sort().join("|");
+        const existing = groups.get(key);
+        const partner = (option) => existing.find((other) => nameKey(other.name) === nameKey(option.name));
+        if (!existing)
+            groups.set(key, copies);
+        else if (copies.every((option) => fits(partner(option), option)))
+            copies.forEach((option) => combine(partner(option), option));
+        else
+            groups.set(`${key}#${groups.size}`, copies);
+    }
+
     const used = [];            // welches Rezept mit wie vielen Portionen gerechnet wurde
     for (const recipeId of recipeIds) {
         const recipe = await getRecipeIngredients(recipeId, servings);
         const { ingredients, servings: target } = recipe;
         used.push({ id: recipe.id, name: recipe.name, servings: target });
-        // Rezepte, die vor dieser Prüfung gespeichert wurden, können die Alternative noch im
-        // Hinweis tragen („oder Chipotle Pulver“): die Zutat, die dort genannt wird, steht dann
-        // oft zusätzlich als eigene Zeile da und darf nicht doppelt gezählt werden
-        const named = new Set(ingredients.filter((entry) => !entry.alternative_group)
-            .map((entry) => alternativeInNote(entry.note)?.toLowerCase()).filter(Boolean));
+
+        // Rezepte, die vor der Prüfung in normalizeIngredient gespeichert wurden, können die
+        // Alternative noch im Hinweis tragen („oder Chipotle Pulver“). Steht die genannte Zutat
+        // zusätzlich als eigene Zeile da, ist diese Zeile die zweite Option (mit ihrer eigenen
+        // Menge) und wird nicht noch einmal gezählt — auch nicht, wenn sie selbst „oder A“ sagt.
+        const plain = ingredients.filter((entry) => !entry.alternative_group);
+        const own = new Map(plain.map((entry) => [nameKey(entry.name), entry]));
+        const partners = new Map();   // Zeile mit Alternative im Hinweis -> zweite Option
+        const taken = new Set();
+        for (const entry of plain) {
+            const alternative = taken.has(entry) ? null : alternativeInNote(entry.note);
+            if (!alternative)
+                continue;
+            const other = own.get(nameKey(alternative));
+            const second = other && other !== entry ? other : { ...entry, name: alternative };
+            partners.set(entry, { ...second, note: null });
+            taken.add(entry).add(second);
+        }
+
+        // eine Gruppe mit nur einer Zutat ist keine Wahl (beim Speichern abgelehnt, ältere
+        // Rezepte können sie haben): dann ist es eine normale Zutat
+        const groupOf = (entry) => entry.alternative_group?.toLowerCase();
+        const members = new Map();
+        for (const entry of ingredients)
+            if (groupOf(entry))
+                members.set(groupOf(entry), [...(members.get(groupOf(entry)) ?? []), entry]);
+
         for (const entry of ingredients) {
-            // Alternativen („entweder Chiliflocken oder Chipotle-Pulver“) werden nie
-            // zusammengefasst und nie einfach auf die Liste gesetzt: sie sind eine Wahl
-            if (!entry.alternative_group && named.has(entry.name.toLowerCase()) && !alternativeInNote(entry.note))
+            if (partners.has(entry)) {
+                addGroup([{ ...entry, note: null }, partners.get(entry)]);
+            } else if (taken.has(entry)) {
                 continue;
-            const noteAlternative = entry.alternative_group ? null : alternativeInNote(entry.note);
-            if (noteAlternative) {
-                const options = [{ ...entry, note: null }, { ...entry, name: noteAlternative, note: null }];
-                // dieselbe Wahl von beiden Seiten („A: oder B“ und „B: oder A“) nur einmal
-                groups.set(`${recipe.id}:${options.map((option) => option.name.toLowerCase()).sort().join("|")}`, options);
-                continue;
+            } else if (members.get(groupOf(entry))?.length > 1) {
+                if (members.get(groupOf(entry))[0] === entry)
+                    addGroup(members.get(groupOf(entry)));
+            } else if (namedAlternatives(entry.name).length > 1) {
+                // „A oder B“ in einem einzigen Namen heißt dasselbe (ebenfalls nur noch bei
+                // älteren Rezepten, neue lehnt normalizeIngredient ab)
+                addGroup(namedAlternatives(entry.name).map((part) => ({ ...entry, name: part })));
+            } else {
+                addNeeded(entry);
             }
-            if (entry.alternative_group) {
-                const groupId = `${recipe.id}:${entry.alternative_group.toLowerCase()}`;
-                if (!groups.has(groupId))
-                    groups.set(groupId, []);
-                groups.get(groupId).push(entry);
-                continue;
-            }
-            // „A oder B“ in einem einzigen Namen heißt dasselbe, auch wenn niemand die
-            // Alternative eingetragen hat (so schreiben es Rezepte und KIs gern)
-            const parts = entry.name.split(/\s+oder\s+/i).map((part) => part.trim()).filter(Boolean);
-            if (parts.length > 1) {
-                groups.set(`${recipe.id}:name:${entry.name.toLowerCase()}`,
-                    parts.map((part) => ({ ...entry, name: part })));
-                continue;
-            }
-            const key = entry.name.toLowerCase();
-            if (!needed.has(key))
-                needed.set(key, []);
-            const entries = needed.get(key);
-            const found = entry.amount === null
-                ? entries[0]
-                : entries.find((other) => other.amount === null || unitKey(other.unit) === unitKey(entry.unit));
-            if (!found) {
-                entries.push({ name: entry.name, unit: entry.unit, amount: entry.amount, note: entry.note });
-            } else if (found.amount === null) {
-                found.amount = entry.amount;
-                found.unit ??= entry.unit;
-            } else if (entry.amount !== null) {
-                found.amount = Number((found.amount + entry.amount).toFixed(3));
-            }
-            if (found)
-                found.note ??= entry.note;
         }
     }
+
+    // steht eine Option ohnehin auf der Liste (ein anderes Rezept braucht sie fest), wird sie
+    // einfach mehr gekauft statt gefragt — das ist kein zweiter Einkauf, sondern derselbe
+    for (const [key, options] of groups)
+        if (options.some((option) => needed.has(option.name.toLowerCase()) && addNeeded(option, true)))
+            groups.delete(key);
 
     const names = [...new Set([...needed.keys(), ...[...groups.values()].flat().map((entry) => entry.name.toLowerCase())])];
     const { rows: pantry } = await db.query(`
@@ -655,7 +745,12 @@ async function planShoppingList(recipeIds, servings) {
             fromPantry.push({ ...covered.pantry, reason: `${covered.pantry.reason} — reicht statt ${others.join(" oder ")}` });
             continue;
         }
-        choices.push({ question: options.map((entry) => entry.name).join(" oder "), options: decided.map((one) => one.item) });
+        // ist von einer Option ein Teil im Vorrat, steht der nur hier (in_pantry) — in
+        // from_pantry gehört er erst, wenn diese Option gewählt ist
+        choices.push({
+            question: options.map((entry) => entry.name).join(" oder "),
+            options: decided.map((one) => (one.pantry ? { ...one.item, in_pantry: one.pantry.reason } : one.item)),
+        });
     }
 
     // bei einem Rezept (und bei mehreren mit derselben Portionszahl) steht hier die Zahl, mit

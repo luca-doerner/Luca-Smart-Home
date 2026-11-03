@@ -73,11 +73,16 @@ const NO_ARGS = { type: "object", additionalProperties: false };
 const BRING_LIST = text("Name oder list_uuid der Bring!-Liste (bring_lists zeigt sie). Weglassen = "
     + "die Standardliste, die der Benutzer auf der Seite „Konto“ gewählt hat, oder die einzige Liste.");
 
+// Zutaten mit gleichem alternative_group: der Agent soll beim Vorlesen nicht beide verlangen
+const ALTERNATIVES_HINT = "Zutaten mit demselben alternative_group sind Alternativen: man braucht "
+    + "nur eine davon (z. B. Chiliflocken oder Chipotle-Pulver).";
+
 const SERVINGS = integer("Für wie viele Portionen gerechnet werden soll. Weglassen = die "
     + "Portionszahl, die im Rezept steht.", { minimum: 1, maximum: 100 });
 
 const INGREDIENT_SCHEMA = object({
-    name: text("Name der Zutat, z. B. „Hackfleisch“. Unbekannte Namen werden im Katalog angelegt."),
+    name: text("Name der Zutat, z. B. „Hackfleisch“. Unbekannte Namen werden im Katalog angelegt. "
+        + "Genau eine Zutat: „A oder B“ als Name wird abgelehnt (dafür gibt es alternative_group)."),
     amount: number("Menge für die Portionszahl des Rezepts. Weglassen für „etwas davon“, z. B. Öl zum Braten."),
     unit: text("Einheit, z. B. g, ml, EL, TL. Weglassen heißt Stück."),
     note: text("Zusatz zur Zutat, z. B. „fein gewürfelt“. KEINE Alternativen wie „oder Chipotle "
@@ -87,7 +92,8 @@ const INGREDIENT_SCHEMA = object({
     alternative_group: text("Für „entweder A oder B“: gib allen Alternativen denselben Text, z. B. "
         + "„Schärfe“ bei Chiliflocken und Chipotle-Pulver. Jede Alternative ist eine eigene Zutat mit "
         + "eigenem Namen. Nicht „A oder B“ in einen Namen schreiben und nicht beide ohne Gruppe anlegen: "
-        + "sonst steht am Ende beides auf der Einkaufsliste."),
+        + "sonst steht am Ende beides auf der Einkaufsliste. Eine Gruppe braucht mindestens zwei "
+        + "Zutaten (Groß-/Kleinschreibung egal); eine allein wird abgelehnt."),
 }, ["name"]);
 
 const STEP_SCHEMA = object({
@@ -133,7 +139,8 @@ const TOOLS = [
     {
         name: "get_recipe",
         title: "Rezept lesen",
-        description: "Ein Rezept vollständig: Zutaten mit Mengen und Gruppen, Schritte, Tags, Zeiten.",
+        description: "Ein Rezept vollständig: Zutaten mit Mengen und Gruppen, Schritte, Tags, Zeiten. "
+            + ALTERNATIVES_HINT,
         inputSchema: object({ id: integer("Die id aus search_recipes.") }, ["id"]),
         run: async ({ id }) => ({ recipe: await recipes.getRecipe(id) }),
     },
@@ -141,7 +148,7 @@ const TOOLS = [
         name: "get_recipe_ingredients",
         title: "Zutaten eines Rezepts",
         description: "Nur die Zutaten eines Rezepts, auf Wunsch auf andere Portionen gerechnet. "
-            + "Zutaten ohne Menge bleiben unverändert.",
+            + "Zutaten ohne Menge bleiben unverändert. " + ALTERNATIVES_HINT,
         inputSchema: object({ id: integer("Die id des Rezepts."), servings: SERVINGS }, ["id"]),
         run: ({ id, servings }) => recipes.getRecipeIngredients(id, servings),
     },
@@ -160,7 +167,9 @@ const TOOLS = [
             + "choices sind Alternativen („Chiliflocken ODER Chipotle-Pulver“). Sie stehen "
             + "absichtlich NICHT in items. Frage den Benutzer für jede Alternative, welche er "
             + "haben will (nenne die Optionen), und trage danach nur die gewählte ein. Nie beide, "
-            + "nie ungefragt eine.",
+            + "nie ungefragt eine. Hat eine Option in_pantry, ist ein Teil davon schon im Vorrat und "
+            + "spec nur der Rest — nenne das, wenn sie gewählt wird. Reicht der Vorrat für eine "
+            + "Option ganz, gibt es keine Frage, sie steht dann in from_pantry.",
         inputSchema: object({
             recipe_ids: list(integer("Die id eines Rezepts."), "Ein bis zwanzig Rezepte."),
             servings: SERVINGS,
