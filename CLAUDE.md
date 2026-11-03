@@ -268,7 +268,13 @@ Start: `sudo node server.js` (root wegen der LEDs). Node ≥ 18 (wegen `fetch`).
   genügt“. Sie stehen **nicht** in `items`, sondern in `choices` (`{ question, options: [{ name,
   spec }] }`, in der Antwort Pflicht wie `from_pantry`); die `note` sagt dem Agenten, dass er
   nachfragen und nur die gewählte eintragen soll. Auch ein einzelner Name „A oder B“ wird
-  automatisch so zerlegt (so schreiben es Rezepte und KIs gern). Reicht der Vorrat für eine
+  automatisch so zerlegt (so schreiben es Rezepte und KIs gern). Dasselbe gilt für „oder X“ im
+  **Hinweis** einer Zutat (`alternativeInNote`): beim Speichern wird das **abgelehnt** mit einer
+  Anleitung (die KI liest die Meldung und legt es richtig an — nur Prompt-Text hat nicht
+  gereicht), und ältere Rezepte, die es schon so tragen, werden beim Einkaufen trotzdem als
+  Wahl erkannt. Am Anfang des Hinweises zählt jedes Wort nach „oder/bzw./alternativ“, mitten
+  im Text nur ein groß geschriebenes (Hauptwort): „fein gewürfelt oder gerieben“ bleibt
+  erlaubt. Reicht der Vorrat für eine
   Option, entfällt die Wahl (steht in `from_pantry`). `POST /api/recipes/:id/bring` nimmt
   `choices: [Name, …]` und verlangt genau eine Option je Alternative, sonst `400` — die Seite
   schaltet den Knopf erst nach der Wahl frei. Das MCP-Werkzeug `bring_add_items` kann das nicht

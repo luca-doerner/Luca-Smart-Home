@@ -80,7 +80,8 @@ const INGREDIENT_SCHEMA = object({
     name: text("Name der Zutat, z. B. „Hackfleisch“. Unbekannte Namen werden im Katalog angelegt."),
     amount: number("Menge für die Portionszahl des Rezepts. Weglassen für „etwas davon“, z. B. Öl zum Braten."),
     unit: text("Einheit, z. B. g, ml, EL, TL. Weglassen heißt Stück."),
-    note: text("Zusatz zur Zutat, z. B. „fein gewürfelt“."),
+    note: text("Zusatz zur Zutat, z. B. „fein gewürfelt“. KEINE Alternativen wie „oder Chipotle "
+        + "Pulver“ — das wird abgelehnt; dafür gibt es alternative_group."),
     group_label: text("Zwischentitel in der Zutatenliste, z. B. „Für die Soße“."),
     optional: flag("true, wenn die Zutat weggelassen werden kann."),
     alternative_group: text("Für „entweder A oder B“: gib allen Alternativen denselben Text, z. B. "
@@ -170,7 +171,9 @@ const TOOLS = [
         name: "create_recipe",
         title: "Rezept anlegen",
         description: "Legt ein neues Rezept an. Zutaten werden über ihren Namen angegeben; "
-            + "Namen, die der Katalog noch nicht kennt, werden dabei angelegt.",
+            + "Namen, die der Katalog noch nicht kennt, werden dabei angelegt.\n\n"
+            + "Steht im Rezept „A oder B“, werden A und B zwei Zutaten mit demselben "
+            + "alternative_group (z. B. „Schärfe“) — nicht B in den Hinweis von A schreiben.",
         inputSchema: object({ recipe: RECIPE_SCHEMA }, ["recipe"]),
         run: async ({ recipe }, user) => ({ recipe: await recipes.saveRecipe(null, recipe, user.id) }),
     },

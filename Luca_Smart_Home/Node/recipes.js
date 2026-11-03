@@ -123,12 +123,24 @@ function normalizeTags(value) {
     return [...tags.values()];
 }
 
+// „oder Chipotle Pulver“ im Hinweis einer Zutat: so schreibt man eine Alternative, wenn man das
+// Feld alternative_group nicht benutzt (eine KI tut das gern). Gibt den Namen der Alternative
+// zurück oder null. Am Anfang des Hinweises zählt jedes Wort; mitten im Text nur ein groß
+// geschriebenes (ein Hauptwort), damit „fein gewürfelt oder gerieben“ keine Alternative ist.
+function alternativeInNote(note) {
+    if (!note)
+        return null;
+    const atStart = note.match(/^\s*(?:oder|bzw\.?|alternativ(?:e|ly)?:?)\s+([^,;()]+)/i);
+    const inside = note.match(/\b(?:oder|bzw\.?)\s+([A-ZÄÖÜ][^,;()]*)/);
+    return (atStart ?? inside)?.[1].trim() || null;
+}
+
 // eine Zeile der Zutatenliste eines Rezepts
 function normalizeIngredient(entry, index) {
     const where = `Zutat ${index + 1}`;
     if (entry === null || typeof entry !== "object" || Array.isArray(entry))
         fail(`${where} muss ein Objekt sein`);
-    return {
+    const normalized = {
         name: requiredText(entry.name, `${where}: Name`),
         amount: optionalAmount(entry.amount, `${where}: Menge`),
         unit: optionalText(entry.unit, `${where}: Einheit`, 20),
@@ -137,6 +149,15 @@ function normalizeIngredient(entry, index) {
         optional: optionalBoolean(entry.optional, `${where}: optional`),
         alternative_group: optionalText(entry.alternative_group, `${where}: Alternative`, MAX_NAME),
     };
+    // Abgelehnt statt still umgebaut: so lernt eine KI aus der Fehlermeldung, es richtig zu
+    // machen, und im Rezept steht die Alternative dort, wo die Einkaufsliste sie findet
+    const alternative = normalized.alternative_group ? null : alternativeInNote(normalized.note);
+    if (alternative)
+        fail(`${where}: Der Hinweis „${normalized.note}“ nennt eine Alternative. Alternativen gehören `
+            + `nicht in den Hinweis, sonst werden beide eingekauft: lege „${alternative}“ als eigene Zutat `
+            + `an (mit derselben Menge und Einheit) und gib beiden Zutaten denselben Text in `
+            + "alternative_group, z. B. „Schärfe“.");
+    return normalized;
 }
 
 function normalizeStep(entry, index) {
@@ -523,9 +544,23 @@ async function planShoppingList(recipeIds, servings) {
         const recipe = await getRecipeIngredients(recipeId, servings);
         const { ingredients, servings: target } = recipe;
         used.push({ id: recipe.id, name: recipe.name, servings: target });
+        // Rezepte, die vor dieser Prüfung gespeichert wurden, können die Alternative noch im
+        // Hinweis tragen („oder Chipotle Pulver“): die Zutat, die dort genannt wird, steht dann
+        // oft zusätzlich als eigene Zeile da und darf nicht doppelt gezählt werden
+        const named = new Set(ingredients.filter((entry) => !entry.alternative_group)
+            .map((entry) => alternativeInNote(entry.note)?.toLowerCase()).filter(Boolean));
         for (const entry of ingredients) {
             // Alternativen („entweder Chiliflocken oder Chipotle-Pulver“) werden nie
             // zusammengefasst und nie einfach auf die Liste gesetzt: sie sind eine Wahl
+            if (!entry.alternative_group && named.has(entry.name.toLowerCase()) && !alternativeInNote(entry.note))
+                continue;
+            const noteAlternative = entry.alternative_group ? null : alternativeInNote(entry.note);
+            if (noteAlternative) {
+                const options = [{ ...entry, note: null }, { ...entry, name: noteAlternative, note: null }];
+                // dieselbe Wahl von beiden Seiten („A: oder B“ und „B: oder A“) nur einmal
+                groups.set(`${recipe.id}:${options.map((option) => option.name.toLowerCase()).sort().join("|")}`, options);
+                continue;
+            }
             if (entry.alternative_group) {
                 const groupId = `${recipe.id}:${entry.alternative_group.toLowerCase()}`;
                 if (!groups.has(groupId))
