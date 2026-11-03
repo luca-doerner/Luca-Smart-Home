@@ -67,7 +67,7 @@ async function rawRequest(method, requestPath, { headers = {}, form, json } = {}
         return await fetch(BASE_URL + requestPath, options);
     } catch (err) {
         // Netzwerkfehler oder Zeitüberschreitung; die Meldung enthält nie den Körper der Anfrage
-        throw new HttpError(502, err.name === "TimeoutError"
+        throw new HttpError(HttpError.UPSTREAM, err.name === "TimeoutError"
             ? "Bring! antwortet nicht (Zeitüberschreitung)"
             : "Bring! ist nicht erreichbar");
     }
@@ -107,10 +107,10 @@ async function connect(userId, email, password) {
         throw new HttpError(400, "Bring! hat die Anmeldung abgelehnt — E-Mail oder Passwort stimmen nicht");
     }
     if (!response.ok)
-        throw new HttpError(502, `Bring!-Anmeldung fehlgeschlagen (HTTP ${response.status})`);
+        throw new HttpError(HttpError.UPSTREAM, `Bring!-Anmeldung fehlgeschlagen (HTTP ${response.status})`);
     const data = await response.json().catch(() => ({}));
     if (!data.access_token || !data.refresh_token || !data.uuid)
-        throw new HttpError(502, "Bring! hat eine unerwartete Antwort bei der Anmeldung geschickt");
+        throw new HttpError(HttpError.UPSTREAM, "Bring! hat eine unerwartete Antwort bei der Anmeldung geschickt");
 
     const credentials = encrypt({ refreshToken: data.refresh_token, uuid: data.uuid, publicUuid: data.publicUuid ?? "" });
     // eine neue Anmeldung behält die gewählte Liste nicht: es kann ein anderes Konto sein
@@ -159,7 +159,7 @@ async function refresh(userId, account) {
     if (!data.access_token) {
         sessions.delete(userId);
         if (response.status >= 500)
-            throw new HttpError(502, `Bring! hat das Erneuern abgelehnt (HTTP ${response.status})`);
+            throw new HttpError(HttpError.UPSTREAM, `Bring! hat das Erneuern abgelehnt (HTTP ${response.status})`);
         throw new HttpError(409, EXPIRED);
     }
     const entry = { accessToken: data.access_token, expiresAt: expiry(data) };
@@ -187,7 +187,7 @@ async function request(userId, account, method, requestPath, options = {}) {
             { ...options, headers: authHeaders(account, await accessToken(userId, account)) });
     }
     if (!response.ok)
-        throw new HttpError(502, `Bring! hat die Anfrage abgelehnt (HTTP ${response.status})`);
+        throw new HttpError(HttpError.UPSTREAM, `Bring! hat die Anfrage abgelehnt (HTTP ${response.status})`);
     return response;
 }
 
@@ -217,7 +217,7 @@ async function resolveList(userId, list) {
     const wanted = (typeof list === "string" && list.trim()) || account.listUuid || null;
     const all = await lists(userId);
     if (all.length === 0)
-        throw new HttpError(502, "Im Bring!-Konto gibt es keine Liste");
+        throw new HttpError(HttpError.UPSTREAM, "Im Bring!-Konto gibt es keine Liste");
     if (wanted) {
         const found = all.find((entry) => entry.list_uuid === wanted)
             ?? all.find((entry) => entry.name.toLowerCase() === wanted.toLowerCase());

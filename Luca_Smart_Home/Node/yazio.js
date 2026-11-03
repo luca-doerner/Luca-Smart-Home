@@ -11,7 +11,7 @@
  * an wie die Community-Clients. Sie kann ohne Vorwarnung brechen — und die Nutzungsbedingungen
  * erlauben sie vermutlich nicht (Risiko: das Konto wird gesperrt). Darum steht alles in dieser
  * einen Datei, und ihr Ausfall darf nie mehr als die yazio_*-Werkzeuge, die Seite „Ernährung“
- * und den „Portion nach YAZIO“-Knopf mitnehmen: er kommt als 502, die Rezepte laufen weiter.
+ * und den „Portion nach YAZIO“-Knopf mitnehmen: er kommt als 424 (HttpError.UPSTREAM), die Rezepte laufen weiter.
  *
  * Quellen (beim Bau gelesen, nicht gegen das echte YAZIO geprüft):
  *   github.com/juriadams/yazio       src/api/**, src/utils/constants.ts (TypeScript, Basis /v20)
@@ -135,10 +135,33 @@ async function rawRequest(method, requestPath, { headers = {}, form, json } = {}
         return await fetch(BASE_URL + requestPath, options);
     } catch (err) {
         // Netzwerkfehler oder Zeitüberschreitung; die Meldung enthält nie den Körper der Anfrage
-        throw new HttpError(502, err.name === "TimeoutError"
+        throw new HttpError(HttpError.UPSTREAM, err.name === "TimeoutError"
             ? "YAZIO antwortet nicht (Zeitüberschreitung)"
             : "YAZIO ist nicht erreichbar");
     }
+}
+
+// Warum YAZIO eine Anfrage ablehnt, kurz genug für eine Meldung. Nur die Textfelder error_description,
+// message und error aus einem JSON-Körper, auf 120 Zeichen gekürzt — nie der ganze Körper (er könnte
+// Daten des Benutzers enthalten) und nie etwas, das wir selbst geschickt haben. Ist die Antwort kein
+// JSON (eine Sperrseite vor YAZIO sieht so aus), steht stattdessen ihr Typ da: das unterscheidet
+// „YAZIO sagt nein“ von „etwas vor YAZIO sagt nein“.
+async function reason(response) {
+    const data = await response.clone().json().catch(() => null);
+    const text = [data?.error_description, data?.message, data?.error].find((value) => typeof value === "string");
+    if (text)
+        return text.replace(/s+/g, " ").trim().slice(0, 120);
+    const type = (response.headers.get("content-type") || "").split(";")[0].trim();
+    return type ? `Antwort vom Typ ${type}` : "";
+}
+
+// Eine abgelehnte Anfrage: ins Log (damit man sie am Pi sieht, die Seite zeigt nur die Meldung) und
+// als Fehler zurück. Im Log steht nur der Pfad ohne Suchbegriffe und Daten, nie ein Token.
+async function rejected(method, requestPath, response, what) {
+    const why = await reason(response);
+    const detail = why ? `HTTP ${response.status}: ${why}` : `HTTP ${response.status}`;
+    log(`YAZIO: ${method} ${requestPath.split("?")[0]} abgelehnt (${detail})`, "stderr");
+    return new HttpError(HttpError.UPSTREAM, `${what} (${detail})`);
 }
 
 // Was beim letzten Mal ging; JSON zuerst, weil der neuere Client es so macht
@@ -203,10 +226,10 @@ async function connect(userId, email, password) {
         throw new HttpError(400, "YAZIO hat die Anmeldung abgelehnt — E-Mail oder Passwort stimmen nicht");
     }
     if (!response.ok)
-        throw new HttpError(502, `YAZIO-Anmeldung fehlgeschlagen (HTTP ${response.status})`);
+        throw await rejected("POST", "/oauth/token", response, "YAZIO-Anmeldung fehlgeschlagen");
     const data = await response.json().catch(() => ({}));
     if (!data.access_token || !data.refresh_token)
-        throw new HttpError(502, "YAZIO hat eine unerwartete Antwort bei der Anmeldung geschickt");
+        throw new HttpError(HttpError.UPSTREAM, "YAZIO hat eine unerwartete Antwort bei der Anmeldung geschickt");
 
     await db.query(`
         INSERT INTO yazio_accounts (user_id, email, credentials) VALUES ($1, $2, $3)
@@ -248,8 +271,9 @@ async function refresh(userId, account) {
     const data = response.ok ? await response.json().catch(() => ({})) : {};
     if (!data.access_token) {
         sessions.delete(userId);
+        const failure = await rejected("POST", "/oauth/token", response, "YAZIO hat das Erneuern abgelehnt");
         if (response.status >= 500)
-            throw new HttpError(502, `YAZIO hat das Erneuern abgelehnt (HTTP ${response.status})`);
+            throw failure;
         throw new HttpError(409, EXPIRED);
     }
     // Wechselt YAZIO den refresh_token bei jeder Erneuerung, ist der alte bald wertlos: der neue
@@ -286,7 +310,7 @@ async function request(userId, account, method, requestPath, options = {}) {
     if (notFound && response.status === 404)
         return response;
     if (!response.ok)
-        throw new HttpError(502, `YAZIO hat die Anfrage abgelehnt (HTTP ${response.status})`);
+        throw await rejected(method, requestPath, response, "YAZIO hat die Anfrage abgelehnt");
     return response;
 }
 
@@ -295,7 +319,7 @@ async function getJson(userId, account, requestPath, options) {
     if (response.status === 404)
         return null;
     return response.json().catch(() => {
-        throw new HttpError(502, "YAZIO hat eine unerwartete Antwort geschickt");
+        throw new HttpError(HttpError.UPSTREAM, "YAZIO hat eine unerwartete Antwort geschickt");
     });
 }
 
@@ -359,7 +383,7 @@ async function searchProducts(userId, query) {
     const params = new URLSearchParams({ query: text, sex: "male", countries: "DE", locales: "de_DE" });
     const data = await getJson(userId, account, `/products/search?${params}`);
     if (!Array.isArray(data))
-        throw new HttpError(502, "YAZIO hat eine unerwartete Antwort auf die Suche geschickt");
+        throw new HttpError(HttpError.UPSTREAM, "YAZIO hat eine unerwartete Antwort auf die Suche geschickt");
     return data.slice(0, MAX_SEARCH_RESULTS).map((entry) => ({
         product_id: entry.product_id,
         name: entry.name,
@@ -415,7 +439,7 @@ async function day(userId, date) {
         getJson(userId, account, `/user/widgets/daily-summary?date=${wanted}`),
     ]);
     if (!consumed || !summary)
-        throw new HttpError(502, "YAZIO hat eine unerwartete Antwort geschickt");
+        throw new HttpError(HttpError.UPSTREAM, "YAZIO hat eine unerwartete Antwort geschickt");
 
     const entries = flattenEntries(consumed);
     const ids = [...new Set(entries.filter((entry) => entry.product_id).map((entry) => entry.product_id))]
@@ -479,7 +503,7 @@ async function goals(userId, date) {
     const account = await loadAccount(userId);
     const data = await getJson(userId, account, `/user/goals/unmodified?date=${wanted}`);
     if (!data)
-        throw new HttpError(502, "YAZIO hat eine unerwartete Antwort geschickt");
+        throw new HttpError(HttpError.UPSTREAM, "YAZIO hat eine unerwartete Antwort geschickt");
     return { date: wanted, goals: goalsFrom(data) };
 }
 

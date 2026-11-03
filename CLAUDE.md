@@ -357,7 +357,7 @@ erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` dir
 - **Bring! (`bring.js`)** läuft auf dem Pi, damit die Kette auch vom Handy aus geht. Bring! hat
   **keine offizielle API**; Pfade, Header und Body sind aus
   [miaucl/bring-api](https://github.com/miaucl/bring-api) übernommen und können ohne Vorwarnung
-  brechen. Darum eigene Datei: ein Fehler von Bring! kommt als 502 — die Rezepte laufen immer
+  brechen. Darum eigene Datei: ein Fehler von Bring! kommt als 424 — die Rezepte laufen immer
   weiter.
   **Jeder Benutzer meldet sich selbst an**, auf der Seite `/account` („Konto“); Tabelle
   `bring_accounts`. Werkzeuge, Knopf und OAuth-/Claude-Code-Tokens schreiben immer in das Konto
@@ -390,8 +390,15 @@ erste Abhängigkeit neben `pg`. Die Werkzeuge rufen `recipes.js`/`pantry.js` dir
   probiert die andere Form nur, wenn der Server die erste nicht versteht (415, oder 400 **ohne**
   OAuth-Fehlerfeld — ein `invalid_grant` heißt „verstanden, Passwort falsch“) und merkt sich, was
   ging. Die Anmeldung kann gegen **Kontosperre** und die Nutzungsbedingungen laufen — Luca hat das
-  bewusst entschieden. Ein Fehler von YAZIO kommt als 502 und nimmt nur die `yazio_*`-Werkzeuge,
-  die Seite „Ernährung“ und den Rezeptknopf mit.
+  bewusst entschieden. Ein Fehler von YAZIO kommt als **424** (`HttpError.UPSTREAM`, wie bei
+  Bring!) und nimmt nur die `yazio_*`-Werkzeuge, die Seite „Ernährung“ und den Rezeptknopf mit.
+  **Nicht 502:** vor dem Pi steht Cloudflare und ersetzt ein 502 des Servers durch seine eigene
+  „Bad gateway“-Seite — die Meldung ginge verloren (so aufgefallen beim ersten echten Test).
+  Die Meldung nennt den Grund aus YAZIOs Antwort (`reason()`: nur `error_description`/`message`/
+  `error`, auf 120 Zeichen gekürzt; ist die Antwort kein JSON, ihr Typ — eine Sperrseite vor
+  YAZIO erkennt man daran), und `rejected()` schreibt dieselbe Zeile ins Log (`/api/log`).
+  Der MCP-Endpunkt zeigt den Fehler ohnehin als `isError`, mit der Browser-Sitzung lässt er sich
+  zum Diagnostizieren aufrufen (`fetch("/api/mcp", …)` mit `tools/call`).
   **Jeder Benutzer meldet sich selbst an** (Seite „Konto“, Tabelle `yazio_accounts`), Anmelden
   und Trennen nur mit Cookie-Login. Passwort wird nicht gespeichert, nur der `refresh_token`
   verschlüsselt (`secret.js`, derselbe Schlüssel wie Bring!). **Wechselt YAZIO den
@@ -479,7 +486,7 @@ mit Schaltern für „Token abgelaufen“, „refresh_token wechselt“, „nur 
 Server mit `YAZIO_API_URL=http://127.0.0.1:<port>/v20` und `SECRET_KEY_FILE=<Temp>` starten.
 Zu prüfen: Anmelden (Cookie ja, Token `403`), falsches Passwort und Sperre nach 10, Rezept mit
 Nährwerten (die Zahlen im POST-Body nachrechnen), Löschen, abgelaufenes Token (genau **eine**
-Erneuerung bei parallelen Anfragen), Ausfall (`502`, Rezepte laufen weiter), und dass alte
+Erneuerung bei parallelen Anfragen), Ausfall (`424`, Rezepte laufen weiter), und dass alte
 Bring!-Werte mit `secret.js` lesbar bleiben (mit dem alten `encrypt` aus `git show` erzeugen).
 
 ## Zusammenarbeit
